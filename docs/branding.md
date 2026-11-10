@@ -26,14 +26,13 @@ unverified derivative is published.
 
 ## Third-party elements
 
-- The artwork contains the **Go logo**, a trademark of **Google LLC**. GoWhale is
-  an independent project and is not affiliated with or endorsed by Google or the
-  Go project. The Go brand guidelines restrict use of the logo; the owner chose to
-  keep the artwork with this attribution and accepts the trademark risk
-  (decision 2026-11-10).
+- The current artwork does not use the **Go logo**. GoWhale is an independent
+  project and is not affiliated with or endorsed by **Google LLC** or the Go
+  project; the Go name remains a trademark of Google LLC.
 - The gopher character is derived from the **Go gopher** created by **Renee
   French**, licensed under **CC BY 4.0**. This attribution is the license notice
-  for that element.
+  for that element. The owner accepted the trademark risk of the earlier artwork
+  on 2026-11-10; the 2026-11-10 replacement removes the Go logo.
 - The exchange names and logos visible in the hero are illustrative. They belong
   to their owners. GoWhale is not affiliated with or endorsed by Binance, BingX,
   Coinbase, Kraken, MEXC, Hyperliquid or any other venue shown in the artwork. Only

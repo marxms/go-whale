@@ -83,21 +83,21 @@ The capability matrix and the connection policy are in
 
 ## Open work
 
-| Area | Item | Status | Exit criterion |
-| --- | --- | --- | --- |
-| CI | The workflows have not executed on GitHub | **Next** | The first push runs `ci`, `integration`, `schema` and `security`; a red job is fixed at the cause |
-| Storage | The boot migration remains in the tree | **Blocked** | A production measurement of `SoleCopyKeysAtRisk == 0` recorded with `doctor`, then an owner decision to remove the migration |
-| Operations | The LAN deployment has no read-only derivatives audit | **Blocked** | Freshness, parity and absence recorded from the destination |
-| Operations | A reused Redis volume can refuse boot under `noeviction` | **Documented** | The runbook in `docs/operations.md` and the Compose warning; the startup gate stays fatal by design |
-| Operations | No repeatable soak result | **Later** | Restarts, goroutines, GC headroom and endpoint latency recorded and published with the protocol |
-| Performance | Ten benchmarks are inconclusive under the protocol | **Later** | Every case published as PASS, inconclusive or accepted-with-ADR; no inconclusive case reported as PASS |
-| Data plane | No transportable kline feed outside `binance:future` | **Later** | A venue publishes a kline stream this service can transport, or the matrix keeps the absence |
-| Data plane | Interior gaps behind the head are not located | **Later** | A coverage index answers which buckets exist without scanning the whole series |
-| Data plane | The process-wide REST budget still lives in the composition root | **Later** | The same budget and classification move behind the driver without changing the cap |
-| Release | Release automation and a published container image | **Later** | The [release checklist](#release-checklist) produces a tag, notes and checksums; an image is built from the same Dockerfile and tagged with the commit |
-| Developer experience | `/openapi.json` has routes but no examples | **Later** | Examples can be added without changing the wire |
-| Developer experience | No client SDK | **Later** | Only after the v1 API is stable; the OpenAPI document remains the source |
-| Developer experience | No Grafana dashboard | **Later** | The dashboard JSON is published next to the metric names it queries |
+| Area | Item | Impact | Source | Status | Exit criterion |
+| --- | --- | --- | --- | --- | --- |
+| CI | The workflows have not executed on GitHub | `actionlint` is not a runner; a job can fail on first contact | Owner decision: local-only until publication | **Blocked** | The first authorized push runs `ci`, `integration`, `schema` and `security`; a red job is fixed at the cause |
+| Storage | The boot migration remains in the tree | Removing it before the proof can destroy the only copy of a candle | ADR 0012, ADR 0032 | **Blocked** | A production measurement of `SoleCopyKeysAtRisk == 0` recorded with `doctor`, then an owner decision to remove the migration |
+| Operations | The LAN deployment has no read-only derivatives audit | Local proofs do not prove the destination | `docs/operations.md` | **Blocked** | Freshness, parity and absence recorded from the destination |
+| Operations | A reused Redis volume can refuse boot under `noeviction` | A restart can refuse boot until the operator reconciles the volume | `docs/operations.md`, `compose.example.yaml` | **Documented** | The runbook and the Compose warning; the startup gate stays fatal by design |
+| Operations | No repeatable soak result | No evidence about restarts, goroutine growth or latency under load | None published | **Later** | Restarts, goroutines, GC headroom and endpoint latency recorded and published with the protocol |
+| Performance | Ten benchmarks are inconclusive under the protocol | An unmeasured number cannot be reported as a pass | ADR 0041, ADR 0042 | **Later** | Every case published as PASS, inconclusive or accepted-with-ADR; no inconclusive case reported as PASS |
+| Data plane | No transportable kline feed outside `binance:future` | Scopes without a feed depend on REST candles and aggregation | `internal/market/capability.go` | **Later** | A venue publishes a kline stream this service can transport, or the matrix keeps the absence |
+| Data plane | Interior gaps behind the head are not located | A hole behind the head can survive while the process reports healthy | `docs/adapters.md` | **Later** | A coverage index answers which buckets exist without scanning the whole series |
+| Data plane | The process-wide REST budget still lives in the composition root | The cap is enforced there, but a new driver caller can bypass it | `docs/adapters.md` | **Later** | The same budget and classification move behind the driver without changing the cap |
+| Release | Release automation and a published container image | No tag, notes or checksums exist until the checklist runs | [Release checklist](#release-checklist) | **Later** | The checklist produces a tag, notes and checksums; an image is built from the same Dockerfile and tagged with the commit |
+| Developer experience | `/openapi.json` has routes but no examples | Consumers must infer payloads from `docs/api.md` | `docs/api.md` | **Later** | Examples can be added without changing the wire |
+| Developer experience | No client SDK | Every consumer writes its own HTTP/WS client | OpenAPI contract | **Later** | Only after the v1 API is stable; the OpenAPI document remains the source |
+| Developer experience | No Grafana dashboard | The metric names exist, but there is no ready dashboard | `docs/operations.md` | **Later** | The dashboard JSON is published next to the metric names it queries |
 
 ## Venue expansion
 
@@ -220,8 +220,8 @@ owner's explicit authorization and a green `make verify` on the tagged commit.
 1. **Version bump.** Set the semantic version in the linker flags
    (`-X .../internal/platform/version.Version=…`) and confirm `gowhale version`
    and `go version -m bin/gowhale` agree.
-2. **Changelog.** Date the `0.1.0` heading and move any remaining `Unreleased`
-   entries under it, keeping Keep a Changelog sections.
+2. **Changelog.** Confirm the `0.1.0` entry is dated, move any `Unreleased`
+   entries into it, and keep the Keep a Changelog sections.
 3. **Gate.** Run `make verify` and the local workflow lint on the exact commit;
    record the log next to the tag.
 4. **Tag.** Create an annotated tag on that commit; never tag a dirty tree.

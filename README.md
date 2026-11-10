@@ -296,11 +296,11 @@ asks for exchange credentials, API keys or production database access in a repor
 
 The source code and documentation are MIT; see [`LICENSE`](LICENSE). The GoWhale
 name and the original elements of the artwork are project marks and are not
-licensed by MIT. The artwork also contains the Go logo, a trademark of Google LLC,
-and a gopher derivative created by Renee French and licensed under CC BY 4.0.
-GoWhale is an independent project and is not affiliated with or endorsed by Google
-or the Go project. The exchange names and logos are illustrative and belong to
-their owners; GoWhale is not affiliated with or endorsed by any venue.
+licensed by MIT. The artwork contains a gopher character derived from the Go gopher
+created by Renee French, licensed under CC BY 4.0. The current artwork does not use
+the Go logo. GoWhale is an independent project and is not affiliated with or
+endorsed by Google or the Go project. The exchange names and logos are illustrative
+and belong to their owners; GoWhale is not affiliated with or endorsed by any venue.
 
 See [`docs/branding.md`](docs/branding.md).
 

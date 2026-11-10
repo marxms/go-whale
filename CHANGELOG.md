@@ -10,12 +10,11 @@ All notable changes to this project are documented here. The format follows
 
 - Certification of the first additional venue (Bybit first, then OKX).
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-11-10
 
 The first public tree. The code was extracted from a private monorepo and is
-prepared for publication as the standalone module `github.com/marxms/go-whale`.
-The heading is dated when the release is published; until then, this section is
-the release candidate, not a published version.
+prepared for publication as the standalone module `github.com/marxms/go-whale`;
+this is the release candidate that the first authorized push publishes.
 
 ### Added
 
@@ -56,6 +55,12 @@ the release candidate, not a published version.
   `redis`, `config.yaml`) instead of a deployment-specific path.
 - The example Compose declares the ZSET listpack step so `doctor` can compare it
   with the indicator cap.
+- The testnet is no longer a configuration default: production hosts are the only
+  default, and a legacy testnet host is reported loudly when configured.
+- Documentation that described CCXT as a supported adapter was removed; the
+  historical ADR remains marked as history.
+- Task and phase narrative was removed from the tree, and the 37 remaining
+  `deadcode` survivors are triaged in `docs/dead-code.md`.
 
 ### Removed
 
