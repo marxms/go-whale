@@ -50,9 +50,15 @@ func (r *MemoryRetryScheduler) Start(ctx context.Context) {
 	oldCancel := r.cancel
 	r.ctx = runCtx
 	r.cancel = cancel
+	// A job scheduled before Start would otherwise sit in the queue until the
+	// next Schedule; kick the loop now that a tracked context exists.
+	kick := len(r.queue) > 0 && r.pending.CompareAndSwap(false, true)
 	r.mu.Unlock()
 	if oldCancel != nil {
 		oldCancel()
+	}
+	if kick {
+		go r.processLoop()
 	}
 }
 
@@ -109,14 +115,21 @@ func (r *MemoryRetryScheduler) Schedule(job BackfillRetryJob) {
 // processLoop drains due jobs every tick and re-enqueues them via the wired
 // callback, exiting when the queue empties (a later Schedule restarts it).
 func (r *MemoryRetryScheduler) processLoop() {
-	defer r.pending.Store(false)
-
 	r.mu.Lock()
 	ctx := r.ctx
-	r.mu.Unlock()
 	if ctx == nil {
-		ctx = context.Background()
+		// Not started yet: never run untracked by the caller's context. Start or
+		// the next Schedule restarts the loop.
+		r.pending.Store(false)
+		r.mu.Unlock()
+		return
 	}
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.pending.Store(false)
+		r.mu.Unlock()
+	}()
 
 	ticker := time.NewTicker(retryTickInterval)
 	defer ticker.Stop()

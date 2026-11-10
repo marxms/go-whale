@@ -24,3 +24,26 @@ func TestMemoryRetrySchedulerStopCancelsTheLoop(t *testing.T) {
 	// Idempotent: a second stop must not panic or require a new Start.
 	s.Stop()
 }
+
+func TestMemoryRetrySchedulerNeverRunsTheLoopWithoutAStartedContext(t *testing.T) {
+	s := NewMemoryRetryScheduler()
+	s.pending.Store(true)
+
+	s.processLoop()
+
+	if s.pending.Load() {
+		t.Fatal("processLoop kept running with no context: the loop must be tracked or not run")
+	}
+}
+
+func TestMemoryRetrySchedulerStartResumesAQueuedJob(t *testing.T) {
+	s := NewMemoryRetryScheduler()
+	s.Schedule(BackfillRetryJob{ExchangeID: "binance", MarketType: "future", Symbol: "BTC/USDT", Timeframe: "5m"})
+
+	s.Start(context.Background())
+	defer s.Stop()
+
+	if !s.pending.Load() {
+		t.Fatal("Start did not resume the loop for a job queued before Start")
+	}
+}
