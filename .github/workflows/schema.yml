@@ -6,7 +6,7 @@ name: Schema
 
 on:
   push:
-    branches: [main]
+    branches: [developer, master]
   pull_request:
 
 permissions:
@@ -71,15 +71,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          declared="$(go test -list 'TestEnsureColumnsLive' ./internal/candle/engine/ | grep -c '^Test' || true)"
+          declared="$(go test -list 'TestEnsureColumnsLive' ./internal/adapters/outbound/questdb/ | grep -c '^Test' || true)"
           if [ "${declared:-0}" -eq 0 ]; then
-            echo "no TestEnsureColumnsLive case in ./internal/candle/engine/ — the schema proof is gone from the repository" >&2
+            echo "no TestEnsureColumnsLive case in ./internal/adapters/outbound/questdb/ — the schema proof is gone from the repository" >&2
             exit 1
           fi
           echo "live schema cases declared: ${declared}"
 
           output="$(mktemp)"
-          go test -race -count=1 -v -run 'TestEnsureColumnsLive' ./internal/candle/engine/ 2>&1 | tee "${output}"
+          go test -race -count=1 -v -run 'TestEnsureColumnsLive' ./internal/adapters/outbound/questdb/ 2>&1 | tee "${output}"
 
           if grep -q -- '--- SKIP' "${output}"; then
             echo "" >&2

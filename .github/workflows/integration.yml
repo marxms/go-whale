@@ -5,7 +5,7 @@ name: Integration
 
 on:
   push:
-    branches: [main]
+    branches: [developer, master]
   pull_request:
 
 permissions:
@@ -84,7 +84,25 @@ jobs:
           WAL_TEST_PG: localhost:8812
         run: |
           set -euo pipefail
-          go test -race -count=1 -v -run 'TestWALBarrier_IsolatedQuestDB823' ./internal/candle/engine/
+
+          declared="$(go test -list 'TestWALBarrier_IsolatedQuestDB823' ./internal/adapters/outbound/questdb/ | grep -c '^Test' || true)"
+          if [ "${declared:-0}" -eq 0 ]; then
+            echo "no TestWALBarrier_IsolatedQuestDB823 case in ./internal/adapters/outbound/questdb/ — the WAL proof is gone from the repository" >&2
+            exit 1
+          fi
+
+          output="$(mktemp)"
+          go test -race -count=1 -v -run 'TestWALBarrier_IsolatedQuestDB823' ./internal/adapters/outbound/questdb/ 2>&1 | tee "${output}"
+
+          if grep -q -- '--- SKIP' "${output}"; then
+            echo "REFUSED: the live WAL case SKIPPED with the engine up; skipping is not passing." >&2
+            exit 1
+          fi
+          passed="$(grep -c '^--- PASS: ' "${output}" || true)"
+          if [ "${passed:-0}" -ne "${declared}" ]; then
+            echo "REFUSED: ${passed} case(s) passed, ${declared} declared by -list." >&2
+            exit 1
+          fi
 
   compose-smoke:
     name: compose smoke (Redis + GoWhale)
