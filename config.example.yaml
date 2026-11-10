@@ -1,0 +1,133 @@
+# ============================================================================
+# GoWhale example configuration.
+#
+# Copy to config.yaml and adjust for your environment. Environment variables
+# prefixed with GOWHALE_ override the matching values; secrets belong there,
+# never in this file. See docs/configuration.md for the full catalogue.
+# ============================================================================
+
+server:
+  port: 3000
+  log_level: warn
+  # text (default) or json
+  log_format: text
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  # db: set with GOWHALE_REDIS_DB when it differs from 0
+  pool_size: 128
+  min_idle_conns: 16
+  dial_timeout_s: 5
+  read_timeout_s: 3
+  write_timeout_s: 3
+  pool_timeout_s: 4
+  max_retries: 2
+
+stream:
+  # Binance supports 1024 streams/connection. Each symbol = 1 stream (@trade).
+  # 150 symbols = 150 streams = 1 connection (14.6% capacity).
+  # Using 500 as default with max_connections_per_ip=3 for safety.
+  max_symbols_per_instance: 500
+  max_connections_per_ip: 3
+  # Per-symbol trade ring-buffer capacity. Realistic peak is ~200 trades/symbol
+  # per 200ms poll (BTC); 5000 = ~25x that headroom. Pre-alloc across 500 symbols
+  # is ~220MB (vs ~1.26GB at 30000), which cuts live-heap GC scan CPU — the root
+  # of the high-CPU-at-500-symbols symptom. Overflow is logged per-symbol, so a
+  # too-small value is safe and monitorable.
+  trade_buffer_size: 5000
+
+exchanges:
+  # Binance Futures — 500 assets via discovery
+  # 500 streams fit in 1 connection (Binance limit: 1024 streams/conn)
+  #
+  - id: binance
+    enabled: true
+    market_type: future
+    limits:
+      max_symbols_per_instance: 500
+      max_connections_per_ip: 3
+    discovery:
+      enabled: true
+      max_assets: 50
+      refresh_interval: "6h"
+
+  # Binance Spot — BTC only
+  - id: binance
+    enabled: true
+    market_type: spot
+    limits:
+      max_symbols_per_instance: 10
+      max_connections_per_ip: 3
+    symbols:
+      - BTC/USDT
+
+  # BingX Futures — BTC
+  - id: bingx
+    enabled: true
+    market_type: future
+    limits:
+      max_symbols_per_instance: 10
+      max_connections_per_ip: 3
+    symbols:
+      - BTC/USDT
+
+  # BingX Spot — BTC
+  - id: bingx
+    enabled: true
+    market_type: spot
+    limits:
+      max_symbols_per_instance: 10
+      max_connections_per_ip: 3
+    symbols:
+      - BTC/USDT
+
+derivatives:
+  enabled: true
+  poll_interval_sec: 300
+  max_series_size: 800
+  bootstrap_limit: 800
+  bootstrap_concurrency: 10
+
+# In-process candle aggregation engine with optional QuestDB tiered storage
+candle_engine:
+  enabled: true
+  timeframes: ["5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w"]
+  buffer_sizes:
+    default: 800
+  redis_write_through: true
+  snapshot_interval_ms: 5000
+
+# QuestDB time-series database for persistent candle storage
+questdb:
+  # Enable the cold tier when QuestDB is reachable. The password is required
+  # and comes from GOWHALE_QUESTDB_PG_PASSWORD, never from this file.
+  enabled: false
+  ilp_address: "localhost:9000"  # HTTP ILP transport
+  pg_address: "localhost:8812"
+  pg_user: "admin"
+  # pg_password comes from GOWHALE_QUESTDB_PG_PASSWORD when the cold tier is enabled
+  pg_database: "qdb"
+  pg_pool_size: 5
+  retention_days: 365
+  table: "candles"
+  partition_by: "DAY"
+  wal_enabled: true
+
+# Budget policy ratios. These are RATIOS, never depths: nothing here says how
+# much data to keep, only when the sizing sheet and the startup gates start
+# complaining. They live in the configuration rather than in code because a
+# threshold written as a literal is a decision nobody can revise without a
+# rebuild. A ratio left out stays undeclared — the sheet prints "target not
+# declared" rather than inventing one.
+retention:
+  budget_warn_ratio: 0.60       # projected occupancy above which the plan is flagged as tight
+  budget_error_ratio: 1.00      # projected occupancy that is over budget (logged, NEVER fatal)
+  occupancy_alert_ratio: 0.70   # MEASURED occupancy that alerts — both maxmemory and container
+  measured_startup_warn_ratio: 0.90  # MEASURED occupancy at startup that warns loudly
+  budget_sample_interval_seconds: 60  # cadence of the continuous observer (not a retention)
+  # Ceiling of the Redis container — the occupancy that kills the process.
+  # The streamer runs in a different container and does not read the Docker
+  # socket; declare the ceiling here so the occupancy alarm compares against
+  # the same number the container enforces.
+  redis_container_memory_limit_mib: 4096

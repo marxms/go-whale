@@ -1,0 +1,9 @@
+.git
+.github
+bin
+config*.yaml
+!config.example.yaml
+.env
+*.test
+*.out
+docs

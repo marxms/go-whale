@@ -1,0 +1,174 @@
+# golangci-lint v2 for the GoWhale module.
+# depguard enforces the import boundary and must be listed under linters.enable, or it
+# silently reports 0 issues. Every other linter was measured against the whole module
+# before being enabled; findings are fixed at the cause, never baselined.
+
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    # Sentinel errors use errors.Is; blocks new == drift.
+    - errorlint
+    # Error and I/O correctness: names, body closes, context propagation, noctx,
+    # and testify usage.
+    - errname
+    - bodyclose
+    - contextcheck
+    - noctx
+    - testifylint
+    # Security, style and global-runtime lint.
+    - gocritic
+    - revive
+    - gosec
+    - forbidigo
+    - gochecknoglobals
+    - gochecknoinits
+    # Text and duplication lint.
+    - misspell
+    - dupword
+    - godot
+    - dupl
+    - goconst
+  exclusions:
+    # Only the two boundaries forbidigo exists to enforce are path-scoped; every other
+    # linter still runs in these paths.
+    rules:
+      # cmd/ owns the exit status, flag parsing and configuration writes.
+      - path: '^cmd/'
+        linters:
+          - forbidigo
+      # The Prometheus adapter is the one place allowed to use promauto.
+      - path: '^internal/adapters/outbound/prometheus/'
+        linters:
+          - forbidigo
+  settings:
+    gocritic:
+      # Stable check set only; experimental checks are unstable across releases.
+      disable-all: false
+    misspell:
+      # US spelling. The ignore list is Portuguese vocabulary that is observable behavior or
+      # part of the pt-BR fixtures; there is no file-level exclusion.
+      ignore-rules:
+        - derivativos
+        - subscribir
+        - convers
+        - comando
+        - programas
+        - argumentos
+        - presentes
+    godot:
+      # Declarative comments only; directives such as //go:build and //nolint are exempt.
+      scope: declarations
+    dupl:
+      # Upstream token threshold; raising it would be a baseline in disguise.
+      threshold: 150
+    goconst:
+      # A literal of at least 3 characters repeated at least 3 times. Test fixtures stay
+      # literal because a constant per sample value would hide the data each case encodes.
+      ignore-tests: true
+    revive:
+      # Explicit rule set; revive inherits nothing once `rules` is present. The stutter check
+      # is disabled because names such as market.MarketInfo are the canonical vocabulary.
+      rules:
+        - name: exported
+          arguments: [disableStutteringCheck]
+        - name: package-comments
+        - name: blank-imports
+        - name: dot-imports
+        - name: var-naming
+        - name: redefines-builtin-id
+        - name: receiver-naming
+        - name: error-naming
+        - name: error-strings
+        - name: time-naming
+        - name: increment-decrement
+        - name: error-return
+        - name: errorf
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: empty-block
+        - name: unreachable-code
+        - name: range
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: unused-parameter
+        - name: var-declaration
+    forbidigo:
+      # Type-aware matching; the only path allowances are the exclusions above.
+      forbid:
+        - pattern: '^log\.Fatal'
+          msg: "log.Fatal calls os.Exit; return an error and let cmd/ own the exit status."
+        - pattern: '^os\.Exit$'
+          msg: "os.Exit belongs to cmd/; run() returns the exit code instead."
+        - pattern: '^os\.(Setenv|Unsetenv)$'
+          msg: "implicit process-configuration writes belong to cmd/; pass configuration explicitly."
+        - pattern: '^config\.(Save|Write|WriteFile|Persist)$'
+          msg: "configuration writes belong to cmd/; pass configuration explicitly."
+        - pattern: '^promauto\.'
+          msg: "register metrics on the injected registry; promauto auto-registers process state."
+    gosec:
+      # All rules; false positives carry a G<id> justification at the call site.
+      excludes: []
+    depguard:
+      rules:
+        market-purity:
+          # Strict: deny everything except the allow-list.
+          list-mode: strict
+          files:
+            - "**/internal/market/**"
+          allow:
+            - "$gostd"
+            - "github.com/marxms/go-whale/internal/market"
+
+        trade-purity:
+          list-mode: strict
+          files:
+            - "**/internal/trade/**"
+          allow:
+            - "$gostd"
+            - "github.com/marxms/go-whale/internal/trade"
+
+        candle-purity:
+          list-mode: strict
+          files:
+            - "**/internal/candle/*.go"
+          allow:
+            - "$gostd"
+            - "github.com/marxms/go-whale/internal/candle"
+            - "github.com/marxms/go-whale/internal/market"
+            - "github.com/marxms/go-whale/internal/trade"
+
+        derivatives-purity:
+          list-mode: strict
+          files:
+            - "**/internal/derivatives/*.go"
+          allow:
+            - "$gostd"
+            - "github.com/marxms/go-whale/internal/derivatives"
+            # The derivatives domain may speak the canonical market vocabulary only.
+            - "github.com/marxms/go-whale/internal/market"
+
+        # The scheduler owns clocks and lifecycle only; cycles arrive as callbacks.
+        scheduler-boundary:
+          list-mode: strict
+          files:
+            - "**/internal/adapters/inbound/scheduler/**"
+          allow:
+            - "$gostd"
+            - "github.com/marxms/go-whale/internal/platform/logging"
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      # Import order is stdlib, third-party, then this module.
+      local-prefixes:
+        - github.com/marxms/go-whale

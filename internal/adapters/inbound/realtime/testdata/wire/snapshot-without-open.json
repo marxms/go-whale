@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "type": "snapshot",
+  "scope": {
+    "exchange": "binance",
+    "marketType": "future",
+    "symbol": "BTC/USDT",
+    "timeframe": "4h"
+  },
+  "baseline": 0
+}

@@ -1,0 +1,42 @@
+{
+  "_leia_isto": [
+    "O ESPERADO DO ESQUEMA, DECLARADO FORA DO DDL QUE O APLICA.",
+    "",
+    "Este arquivo existe porque a conferência do job `schema` era TAUTOLÓGICA: ela derivava o",
+    "declarado do próprio `questdb-init.sql` que acabara de aplicar, sobre um QuestDB que nasce",
+    "vazio a cada run. Trocar `PARTITION BY DAY` por `MONTH` no DDL movia OS DOIS LADOS da",
+    "comparação, e o job aprovava — medido contra a 8.2.3 real. O único desfecho que aquela",
+    "comparação podia pegar era 'o motor discordou do DDL', e não é isso que CLO-5 pede.",
+    "",
+    "Com esta declaração o eixo muda: o job compara o MOTOR contra o que está ESCRITO AQUI.",
+    "Mudar o DDL sem mudar este arquivo passa a REPROVAR — que é o ponto. Mudar `partitionBy`",
+    "de uma tabela viva é decisão irreversível (`PARTITION BY` é imutável e `CREATE TABLE IF NOT",
+    "EXISTS` é sucesso silencioso sobre uma tabela nascida errada), então ela tem de custar uma",
+    "edição deliberada em DOIS arquivos, com o par visível no diff.",
+    "",
+    "COMO EDITAR: mudou o DDL de propósito? Edite aqui também, no mesmo commit. O job vermelho",
+    "não é obstáculo — é a pergunta 'você decidiu isto?' feita antes de a partição existir.",
+    "",
+    "ESCOPO. Só o que é IMUTÁVEL ou estrutural por tabela: particionamento, WAL, dedup e as",
+    "colunas da chave de UPSERT. A lista de COLUNAS não está aqui de propósito: coluna nova é",
+    "responsabilidade de `QuestDBStore.EnsureSchema` (probe-então-ALTER, a cada boot), então",
+    "congelá-la aqui reprovaria todo acréscimo legítimo.",
+    "",
+    "Conferido por `.github/workflows/schema.yml`, contra `questdb/questdb:8.2.3`."
+  ],
+  "questdbVersion": "8.2.3",
+  "tables": {
+    "candles": {
+      "partitionBy": "DAY",
+      "walEnabled": true,
+      "dedup": true,
+      "upsertKeys": ["timestamp", "exchange", "market_type", "symbol", "timeframe"]
+    },
+    "derivatives": {
+      "partitionBy": "DAY",
+      "walEnabled": true,
+      "dedup": true,
+      "upsertKeys": ["timestamp", "source", "exchange", "market_type", "symbol", "timeframe"]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# Private runtime configuration and secrets
+/config.yaml
+/config.*.yaml
+!config.example.yaml
+.env
+/.env
+
+# Build output
+/bin/
+*.test
+*.out
+
+# Local runtime state (benchmarks, scratch files)
+/.runtime/

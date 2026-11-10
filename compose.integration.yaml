@@ -1,0 +1,63 @@
+name: gowhale-integration
+
+# Integration-only dependencies. This stack is never part of the minimal
+# example journey: QuestDB is enabled here explicitly for schema and
+# integration checks.
+#
+# Usage:
+#   docker compose -f compose.integration.yaml up -d
+#   make integration
+#   docker compose -f compose.integration.yaml down
+#
+# Apply the GoWhale DDL with a QuestDB pgwire client before the integration
+# run:
+#   psql "postgres://admin:quest@localhost:8812/qdb" \
+#     -f scripts/questdb/questdb-init.sql
+# The DDL lives in this repository and is exercised by
+# internal/conformance/schema.
+services:
+  redis:
+    # Pinned by tag and manifest-list digest (verified 2026-11-05).
+    image: redis:8.4.0-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78
+    # Disposable integration data: allkeys-* lets Redis evict instead of
+    # failing writes once the budget is reached. Not a deployment policy.
+    command: ["redis-server", "--appendonly", "no", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - integration
+
+  questdb:
+    # Pinned by tag and manifest-list digest (verified 2026-11-05).
+    image: questdb/questdb:8.2.3@sha256:1e109276b61087010d8a3a0b033c313fcb26f6af898cbdc30f53e51cf494d0c5
+    environment:
+      QDB_HTTP_ENABLED: "true"
+      QDB_LINE_TCP_ENABLED: "true"
+      QDB_PG_ENABLED: "true"
+      QDB_CAIRO_COMMIT_MODE: "sync"
+    volumes:
+      - questdb-data:/var/lib/questdb
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9009:9009"
+      - "127.0.0.1:8812:8812"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/127.0.0.1/8812'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    networks:
+      - integration
+
+volumes:
+  questdb-data:
+
+networks:
+  integration:
+    driver: bridge

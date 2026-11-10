@@ -1,0 +1,28 @@
+{
+  "v": 1,
+  "seq": 42,
+  "type": "candle.close",
+  "scope": {
+    "exchange": "binance",
+    "marketType": "future",
+    "symbol": "BTC/USDT",
+    "timeframe": "4h"
+  },
+  "candle": {
+    "timestamp": 1700000000000,
+    "open": 42000.5,
+    "high": 42500.75,
+    "low": 41900.25,
+    "close": 42310.1,
+    "volume": 1234.5678,
+    "createdAt": 1700000000100,
+    "lastUpdate": 1700000001900,
+    "takerBuyVolume": 700.5,
+    "takerSellVolume": 534.0678,
+    "source": "binance",
+    "aggregateMethod": "trade-merge",
+    "sideUnknownCount": 3,
+    "lateTradeCount": 1
+  },
+  "emittedAt": 1700000014400123
+}
