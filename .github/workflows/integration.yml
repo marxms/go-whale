@@ -1,0 +1,135 @@
+# Integration surface: the `integration` build tag against real services, plus the local
+# Compose journey. The live-venue probes need credentials and a venue budget; this workflow
+# compiles every tagged package and runs the offline subset plus the real-engine cases.
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: integration (Redis + QuestDB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      redis:
+        image: redis:8.4.0-bookworm
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+      questdb:
+        image: questdb/questdb:8.2.3
+        ports:
+          - 9000:9000
+          - 8812:8812
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The image ships no curl; a timed-out wait is a failure, never a silent pass.
+      - name: Wait for QuestDB
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 90); do
+            if curl -sf -G --data-urlencode "query=select 1" http://localhost:9000/exec \
+                 | grep -q '"dataset"'; then
+              echo "QuestDB is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "QuestDB did not answer in 90s — the integration cases did NOT run" >&2
+          exit 1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26.10"
+          cache-dependency-path: go.sum
+
+      # Compile gate for every tagged package; the live-venue probes are not run here.
+      - name: Compile integration-tagged tests
+        run: make integration-compile
+
+      # Offline: the harness parses a recorded production envelope and touches no venue.
+      - name: Offline parity cases
+        run: |
+          set -euo pipefail
+          go test -tags=integration -race -count=1 -v -run 'TestParseFleet' ./internal/conformance/parity/
+
+      # Opt-in WAL/ILP case against the ephemeral engine above (production tag).
+      - name: Real WAL/ILP cases
+        env:
+          GOWHALE_REDIS_ADDR: localhost:6379
+          GOWHALE_QUESTDB_ENABLED: "true"
+          GOWHALE_QUESTDB_ILP_ADDRESS: localhost:9000
+          GOWHALE_QUESTDB_PG_ADDRESS: localhost:8812
+          GOWHALE_QUESTDB_PG_PASSWORD: quest
+          WAL_TEST_ISOLATED: "yes"
+          WAL_TEST_ILP: localhost:9000
+          WAL_TEST_PG: localhost:8812
+        run: |
+          set -euo pipefail
+          go test -race -count=1 -v -run 'TestWALBarrier_IsolatedQuestDB823' ./internal/candle/engine/
+
+  compose-smoke:
+    name: compose smoke (Redis + GoWhale)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Compose smoke
+        run: |
+          set -euo pipefail
+
+          compose=(docker compose -f compose.example.yaml)
+          cleanup() { "${compose[@]}" down -v >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          "${compose[@]}" config --quiet
+
+          # Minimal journey; QuestDB starts only if the compose file declares it.
+          "${compose[@]}" up -d --build redis gowhale
+
+          # The smoke asserts the HTTP contract, not venue connectivity: runner egress may
+          # not reach every exchange, and a 503 is still the process answering its health.
+          code=""
+          for _ in $(seq 1 90); do
+            code="$(curl -s -o /tmp/gowhale-health.json -w '%{http_code}' http://127.0.0.1:3000/health || true)"
+            if [ "${code}" = "200" ] || [ "${code}" = "503" ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "${code}" != "200" ] && [ "${code}" != "503" ]; then
+            "${compose[@]}" logs gowhale >&2 || true
+            echo "REFUSED: GoWhale did not answer /health within 180s (last HTTP code '${code}')" >&2
+            exit 1
+          fi
+          if ! grep -q '"status"' /tmp/gowhale-health.json; then
+            "${compose[@]}" logs gowhale >&2 || true
+            echo "REFUSED: /health answered HTTP ${code} without a status field" >&2
+            exit 1
+          fi
+
+          pong="$("${compose[@]}" exec -T redis redis-cli ping)"
+          if [ "${pong}" != "PONG" ]; then
+            echo "REFUSED: Redis did not answer PING (got '${pong}')" >&2
+            exit 1
+          fi
+          echo "APPROVED: Compose journey up (health HTTP ${code}), Redis answering"

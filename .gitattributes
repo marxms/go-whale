@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+*.go text
+*.md text
+*.yaml text
+*.yml text
+*.sh text
+Makefile text
+Dockerfile text
+
+*.png binary
+*.webp binary
