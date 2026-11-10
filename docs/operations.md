@@ -80,7 +80,7 @@ capability matrix. The WS feed itself is the in-process distribution hub; Redis
 Pub/Sub is a separate producer for external consumers. The example Compose does not
 set the secrets, so its WS routes are absent by design.
 
-## `noeviction` boot refusal (M10)
+## `noeviction` boot refusal
 
 The service has resident families without TTL (`candles`, `derivatives:series`).
 Under `noeviction`, Redis fails writes once memory is full instead of evicting a

@@ -10,10 +10,12 @@ All notable changes to this project are documented here. The format follows
 
 - Certification of the first additional venue (Bybit first, then OKX).
 
-## [0.1.0] - 2026-11-09
+## [0.1.0] - unreleased
 
 The first public tree. The code was extracted from a private monorepo and is
 prepared for publication as the standalone module `github.com/marxms/go-whale`.
+The heading is dated when the release is published; until then, this section is
+the release candidate, not a published version.
 
 ### Added
 
@@ -68,6 +70,8 @@ prepared for publication as the standalone module `github.com/marxms/go-whale`.
 - The API and configuration are pre-1.0 and may change between minor versions.
 - Only `binance:future` has a transportable kline feed; the other scopes declare
   the absence and aggregate from trades.
+- Interior gaps behind the head are not located; recovery windows derive from the
+  head and need a coverage index for the middle of a series.
 - The boot migration remains until `SoleCopyKeysAtRisk == 0` is proven against
   production data.
 - The GitHub workflows have not yet executed on the public remote.

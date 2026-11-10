@@ -111,8 +111,6 @@ Zero means the venue does not document the value.
 - **Kline feed for other venues.** BingX publishes no candle stream this
   service can transport; the matrix declares the absence and the tape keeps
   writing.
-- **Historical open-interest backfill.** It needs a historical source per
-  venue, which is another budget and another design.
 - **Consolidating `exchange.RestBudget` and the pacer into the driver.** The
   refactor moves the request bodies; it does not redesign the budget.
 

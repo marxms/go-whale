@@ -10,12 +10,15 @@ the contract harness certifies it.
 | Status | Meaning |
 | --- | --- |
 | **Shipped** | Present in the current tree and covered by the product gate |
-| **Resolved** | A known problem whose fix is present and covered by a regression test |
 | **Documented** | A known operator condition with a runbook, not a code fix |
 | **Next** | Agreed and unblocked; the next work to be scheduled |
 | **Later** | Agreed, but depends on a prerequisite or on demand |
 | **Blocked** | Needs an external proof, an owner decision or access we do not have |
 | **Not planned** | Explicitly out of scope, with the reason recorded |
+
+Work that is already fixed is not repeated here. The first public tree carries the
+fixes recorded in [`CHANGELOG.md`](CHANGELOG.md); this roadmap lists only what is
+still open, planned or blocked.
 
 Priority is about correctness and user impact, not about how easy the work is.
 
@@ -78,34 +81,23 @@ The capability matrix and the connection policy are in
 [`docs/adapters.md`](docs/adapters.md) and
 [`internal/market/capability.go`](internal/market/capability.go).
 
-## Known problems
+## Open work
 
-These are the items carried from the extraction debt register (2026-11-06), the
-LAN validation (2026-11-07) and the multi-exchange recovery session. The table is
-the public record; an item leaves it only when its exit criterion is met.
-
-| ID | Problem | Status | Why it matters | Exit criterion |
-| --- | --- | --- | --- | --- |
-| P1 | CCXT pulled `go-ethereum` (GPL-3.0) into an MIT binary | **Resolved** | The license inventory could not describe the binary as MIT-only | Removed; `go list -m all` contains no CCXT or `go-ethereum` (ADR 0006) |
-| P2 | Boot migration remains in the tree | **Blocked** | Removing it before proving `SoleCopyKeysAtRisk == 0` against production can destroy the only copy of a candle | A production measurement recorded with the `doctor` command, then an owner decision to remove the migration |
-| P3 | CI workflows have never executed on GitHub | **Next** | Local `actionlint` is not a substitute for a real runner | The first push runs `ci`, `integration`, `schema` and `security`; failures are fixed at the cause |
-| P4 | The public repository was never published | **Blocked** | The code existed only as an internal module | The launch commits exist in a local repository; publication requires an owner-authorized push |
-| P5 | LAN derivatives data was not audited at the destination | **Blocked** | Local proof does not prove the deployed data | A read-only audit of the destination, with freshness, parity and absence recorded |
-| P6 | Ten benchmarks are inconclusive (CV > 10%) | **Later** | A number outside the protocol cannot become a PASS by repetition | Re-run with the same protocol and publish PASS, inconclusive or accepted-with-ADR per case |
-| P7 | Comment debt outside the Go module | **Not planned here** | The TypeScript/React corpus is a separate codebase, not this repository | Out of scope; tracked by the owner outside this repository |
-| P8 | Stale CCXT references in docs | **Resolved** | Documentation that names a removed adapter sends contributors to a dead end | Zero current-support CCXT references; the historical ADR stays marked as history |
-| M1 | Recovery can no-op on an explicit window | **Resolved** | A backstop job with `window.start > 0` can refetch only the straddling bucket, so the series freezes behind a stale head while the process still reports healthy | Every missing bucket in `[window.start, now]` is written; the head advances; a no-progress breaker suspends and records the scope |
-| M2 | Seed writes do not normalize impossible OHLC | **Resolved** | A venue can publish a weekly candle with `high < open`; an impossible candle must not enter Redis or the engine | Every seeded candle passes the write gate; the real BCHUSDT 1w line from 2020-01-13 is a regression fixture |
-| M3 | The driver capability contract is not exercised for every scope | **Resolved** | A matrix row without a harness is a declaration, not a certification | The four scopes pass `TestVenueContractFourScopes` for every driver capability; every absent driver capability returns its typed error and records the metric |
-| M13 | Boot marking covers only the kline feed interval | **Resolved** | Coarser buckets stay unmarked and their repair is vetoed, so the series can freeze while the process is healthy | Every configured timeframe of the open bucket is marked; a coarser bucket's repair is proven not to be vetoed |
-| M4 | The testnet was reachable as a configuration default | **Resolved** | Testnet prices are production-like but not production data | Production hosts are the default; `.env.example` no longer advertises the testnet; a test asserts the policy |
-| M5 | Only `binance:future` has a transportable kline feed | **Later** | The other scopes need trade aggregation and REST candles; the matrix declares the absence | A venue publishes a kline stream this service can transport, or the scope stays declared absent |
-| M6 | Interior gaps behind the head are not located | **Later** | The recovery window derives from the head; a hole in the middle needs a coverage index | A coverage index answers "which buckets exist" without scanning the whole series |
-| M7 | Historical open-interest backfill is absent | **Later** | Current OI and OI history are not the same product | A per-venue historical source, its budget and its absence semantics are designed |
-| M8 | The REST budget and the pacer are split | **Later** | Two budget mechanisms are two ways to be wrong about the same limit | One process-wide budget owns every venue read, with the same classification |
-| M10 | A reused Redis volume can refuse boot under `noeviction` | **Documented** | Resident families without TTL can hit the ceiling after a restart | The operator runbook and the Compose warning; the startup gate stays fatal by design |
-| M11 | The binary had no public version surface | **Resolved** | A user could not identify the build in a report | `gowhale version` prints version, commit and build date; `go version -m` shows the module |
-| M12 | Dead code and task narrative remained | **Resolved** | A public tree should not carry abandoned paths or phase labels | `go tool deadcode ./cmd/...` is clean or every survivor is justified; no `TASK`/`Fase`/`Trilha` narrative |
+| Area | Item | Status | Exit criterion |
+| --- | --- | --- | --- |
+| CI | The workflows have not executed on GitHub | **Next** | The first push runs `ci`, `integration`, `schema` and `security`; a red job is fixed at the cause |
+| Storage | The boot migration remains in the tree | **Blocked** | A production measurement of `SoleCopyKeysAtRisk == 0` recorded with `doctor`, then an owner decision to remove the migration |
+| Operations | The LAN deployment has no read-only derivatives audit | **Blocked** | Freshness, parity and absence recorded from the destination |
+| Operations | A reused Redis volume can refuse boot under `noeviction` | **Documented** | The runbook in `docs/operations.md` and the Compose warning; the startup gate stays fatal by design |
+| Operations | No repeatable soak result | **Later** | Restarts, goroutines, GC headroom and endpoint latency recorded and published with the protocol |
+| Performance | Ten benchmarks are inconclusive under the protocol | **Later** | Every case published as PASS, inconclusive or accepted-with-ADR; no inconclusive case reported as PASS |
+| Data plane | No transportable kline feed outside `binance:future` | **Later** | A venue publishes a kline stream this service can transport, or the matrix keeps the absence |
+| Data plane | Interior gaps behind the head are not located | **Later** | A coverage index answers which buckets exist without scanning the whole series |
+| Data plane | The process-wide REST budget still lives in the composition root | **Later** | The same budget and classification move behind the driver without changing the cap |
+| Release | Release automation and a published container image | **Later** | The [release checklist](#release-checklist) produces a tag, notes and checksums; an image is built from the same Dockerfile and tagged with the commit |
+| Developer experience | `/openapi.json` has routes but no examples | **Later** | Examples can be added without changing the wire |
+| Developer experience | No client SDK | **Later** | Only after the v1 API is stable; the OpenAPI document remains the source |
+| Developer experience | No Grafana dashboard | **Later** | The dashboard JSON is published next to the metric names it queries |
 
 ## Venue expansion
 
@@ -177,41 +169,6 @@ the same for every venue; the reference implementation is `binance:future`.
 
 A scope that fails any item does not ship.
 
-## Data plane
-
-| Item | Status | Next step |
-| --- | --- | --- |
-| Generic recovery over explicit windows (M1) | **Resolved** | Make a job with `window.start > 0` fetch the whole `[start, now]`; keep the one-bucket shortcut only for a short reconnect without an explicit window. Add a no-progress breaker test. |
-| Seed normalization (M2) | **Resolved** | Normalize or reject every seeded candle at the write gate; keep the BCHUSDT 1w regression. |
-| Driver capability harness for every scope (M3) | **Resolved** | `TestVenueContractFourScopes` exercises the four scopes and every declared driver absence. |
-| In-flight timeframe marking at boot (M13) | **Resolved** | Mark every configured timeframe of the open bucket, not only the kline feed interval; prove that a coarser bucket's repair is not vetoed. |
-| Interior gap coverage (M6) | **Later** | Design a coverage index keyed by symbol and timeframe; do not scan the whole series per cycle. |
-| Historical OI backfill (M7) | **Later** | Pick the first venue with a documented historical endpoint; design its budget and absence semantics. |
-| Kline feeds beyond the reference scope (M5) | **Later** | Transport a venue kline stream only where it exists; otherwise keep the declared absence. |
-| REST budget consolidation (M8) | **Later** | Move the pacer behind the same process-wide budget, with one classification table. |
-
-## Reliability and operations
-
-| Item | Status | Exit criterion |
-| --- | --- | --- |
-| Boot migration removal (P2) | **Blocked** | Production proof of `SoleCopyKeysAtRisk == 0` and an owner decision |
-| CI on GitHub (P3) | **Next** | The four workflows run on the first push; a red job is fixed, not ignored |
-| Release automation | **Later** | A tag, changelog, checksums and a GitHub release produced by the [release checklist](#release-checklist); no prebuilt binary is claimed before it exists |
-| Container image | **Later** | A published image is built from the same Dockerfile and tagged with the commit; the README only claims it after publication |
-| Soak and load | **Later** | A repeatable soak records restarts, goroutines, GC headroom and endpoint latency; the result is published with its protocol |
-| Benchmarks (P6) | **Later** | Every case is PASS, inconclusive or accepted-with-ADR; no inconclusive case is reported as PASS |
-| LAN derivatives audit (P5) | **Blocked** | Read-only destination audit with freshness, parity and absence recorded |
-
-## Developer experience
-
-| Item | Status | Notes |
-| --- | --- | --- |
-| `gowhale version` (M11) | **Shipped** | Version, commit and build date; `go version -m` also identifies the module |
-| OpenAPI examples | **Later** | The route contract is served at `/openapi.json`; examples can follow without changing the wire |
-| Client SDK | **Later** | Only after the v1 API is stable; the OpenAPI document is the source |
-| Grafana dashboard | **Later** | Publish the dashboard JSON next to the metric names it queries |
-| Reproducible local stack | **Shipped** | `compose.example.yaml` for Redis + GoWhale; `compose.integration.yaml` for QuestDB checks |
-
 ## Milestones
 
 Milestones are exit criteria, not dates. A milestone can slip; a criterion cannot
@@ -227,7 +184,7 @@ be weakened to make it pass.
 - [x] `serve`, `doctor` and `version`.
 - [x] `make verify` green in the new repository.
 - [x] Brand assets, README, roadmap, community files and local CI validation.
-- [ ] Four independent reviews and an independent verifier.
+- [x] Four independent reviews and an independent verifier.
 - [ ] Publication, after the reviews and the owner's explicit authorization.
 
 ### v0.2.0 — the first new venue and the first public CI run
@@ -240,8 +197,8 @@ be weakened to make it pass.
 
 - [ ] Coinbase and Kraken certified for their declared scopes.
 - [ ] Release automation and a published container image.
-- [ ] P2 either closed with the production proof or explicitly carried with the
-      same blocker.
+- [ ] The boot-migration blocker either closed with the production proof or
+      explicitly carried with the same blocker.
 - [ ] A published benchmark report with PASS, inconclusive and accepted-with-ADR
       verdicts.
 - [ ] A repeatable soak report.
@@ -263,8 +220,8 @@ owner's explicit authorization and a green `make verify` on the tagged commit.
 1. **Version bump.** Set the semantic version in the linker flags
    (`-X .../internal/platform/version.Version=…`) and confirm `gowhale version`
    and `go version -m bin/gowhale` agree.
-2. **Changelog.** Move `Unreleased` entries under a dated heading in
-   `CHANGELOG.md`, keeping Keep a Changelog sections.
+2. **Changelog.** Date the `0.1.0` heading and move any remaining `Unreleased`
+   entries under it, keeping Keep a Changelog sections.
 3. **Gate.** Run `make verify` and the local workflow lint on the exact commit;
    record the log next to the tag.
 4. **Tag.** Create an annotated tag on that commit; never tag a dirty tree.

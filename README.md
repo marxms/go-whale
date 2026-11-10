@@ -1,7 +1,7 @@
 <p align="center">
   <img src="docs/assets/brand/gowhale-hero.webp" alt="GoWhale mascot riding a whale through market data" width="720">
 </p>
-<p align="center"><em>Illustrative artwork. Supported venues are listed below; Backpack and Hyperliquid are planned, not supported.</em></p>
+<p align="center"><em>Illustrative artwork. Only Binance and BingX are supported today; the other venues shown are planned or illustrative, not supported. The capability matrix below is the source of truth.</em></p>
 
 # GoWhale
 
