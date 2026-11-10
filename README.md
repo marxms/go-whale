@@ -4,7 +4,7 @@
 
 # GoWhale
 
-**Low-latency, correctness-first crypto market data in Go.**
+**Real-time, correctness-first crypto market data in Go.**
 
 GoWhale ingests public exchange streams, aggregates trades into canonical OHLCV
 candles with measured taker flow, serves them over HTTP and WebSocket, and keeps a
