@@ -113,7 +113,7 @@ baseline floor by the store.
 | `redis_cap_by_timeframe` | map | empty | resident candle ZSET cap per timeframe |
 
 The resident cap resolution order is documented in
-[redis.md](redis.md#candlesexchangemarketsymboltimeframe).
+[redis.md](redis.md#candlesexchangemarkettypesymboltimeframe).
 
 ### `questdb`
 

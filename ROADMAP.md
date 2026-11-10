@@ -35,6 +35,24 @@ Priority is about correctness and user impact, not about how easy the work is.
 6. **No fabricated PASS.** A benchmark with a coefficient of variation above the
    protocol threshold is inconclusive, not a pass.
 
+## Data-integrity invariants
+
+These invariants constrain every current and future venue adapter. A change that
+cannot satisfy one of them ships a declared absence instead. Normalization at the
+write gate (principle 4 above) is the fourth.
+
+1. **Settled kline authority.** A venue kline feed is a hint, not history. The
+   bucket written by trade aggregation is authoritative; a kline may only fill a
+   bucket the trade stream cannot observe, and it never overwrites a settled
+   candle. Recovery and seeding use the same rule.
+2. **Taker-buy/sell identity.** CVD is the sum of attributable taker buy and sell
+   volume and must reconcile with total volume for the same trade set. A venue
+   that cannot attribute both sides declares CVD absent; the adapter does not
+   estimate it.
+3. **Sole-copy guard.** Data with a single durable copy is protected. Pruning and
+   migration refuse to delete a key that no other tier holds, so a future tier or
+   venue cannot silently become the only copy.
+
 ## Current state
 
 Prepared for the first public release (publication pending owner authorization):
@@ -178,7 +196,7 @@ A scope that fails any item does not ship.
 | --- | --- | --- |
 | Boot migration removal (P2) | **Blocked** | Production proof of `SoleCopyKeysAtRisk == 0` and an owner decision |
 | CI on GitHub (P3) | **Next** | The four workflows run on the first push; a red job is fixed, not ignored |
-| Release automation | **Later** | A tag, changelog, checksums and a GitHub release produced by a documented checklist; no prebuilt binary is claimed before it exists |
+| Release automation | **Later** | A tag, changelog, checksums and a GitHub release produced by the [release checklist](#release-checklist); no prebuilt binary is claimed before it exists |
 | Container image | **Later** | A published image is built from the same Dockerfile and tagged with the commit; the README only claims it after publication |
 | Soak and load | **Later** | A repeatable soak records restarts, goroutines, GC headroom and endpoint latency; the result is published with its protocol |
 | Benchmarks (P6) | **Later** | Every case is PASS, inconclusive or accepted-with-ADR; no inconclusive case is reported as PASS |
@@ -236,6 +254,29 @@ be weakened to make it pass.
 - [ ] No open blocker or high-severity issue.
 - [ ] The recovery and seed invariants are covered by regression tests that fail
       when the behaviour is removed.
+
+## Release checklist
+
+Not executed in this cycle. A release happens only after the reviews, the
+owner's explicit authorization and a green `make verify` on the tagged commit.
+
+1. **Version bump.** Set the semantic version in the linker flags
+   (`-X .../internal/platform/version.Version=…`) and confirm `gowhale version`
+   and `go version -m bin/gowhale` agree.
+2. **Changelog.** Move `Unreleased` entries under a dated heading in
+   `CHANGELOG.md`, keeping Keep a Changelog sections.
+3. **Gate.** Run `make verify` and the local workflow lint on the exact commit;
+   record the log next to the tag.
+4. **Tag.** Create an annotated tag on that commit; never tag a dirty tree.
+5. **Checksums.** Build the binary from the tag and publish its SHA-256, plus the
+   asset checksums in `docs/branding.md` when the artwork changed.
+6. **GitHub release.** Notes come from the changelog; the release links the
+   checksums and states the supported scopes from the capability matrix.
+7. **Container image (future).** Only after an image workflow exists: build from
+   the same `Dockerfile`, tag it with the commit, and update the README before
+   claiming it.
+8. **Post-release.** Verify the published artifacts against the checksums and
+   record the result.
 
 ## What this roadmap does not promise
 

@@ -59,8 +59,9 @@ curl -sS 'http://127.0.0.1:3000/api/batch/prices?exchange=binance&marketType=fut
 
 ## `GET /api/batch/derivatives-series`
 
-Derivatives series for a set of symbols. Required: `timeframe`; optional:
-`exchange`, `marketType`, `symbols`, `limit`.
+Derivatives series for a set of symbols. Required: `symbols`; optional:
+`exchange`, `marketType`, `timeframe` (defaults to the configured default) and
+`limit` (default 30). A missing `symbols` returns `400`.
 
 ## `GET /api/subscriptions`
 
@@ -117,5 +118,6 @@ Connections and per-connection subscriptions are capped by
 
 Errors use JSON with an `error` string; some routes also return a stable `code`.
 The HTTP status is the contract: `400` for an invalid request, `401` for an invalid
-ticket or missing mint token, `403` for a rejected origin, `503` when the edge is not
+ticket or missing mint token, `403` for a rejected origin, `404` when the edge is not
+mounted (both WS secrets unset), `503` when it is mounted but its auth is not
 configured, and `500` for a read failure.
