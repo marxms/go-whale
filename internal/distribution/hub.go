@@ -27,7 +27,34 @@ const (
 
 	cmdBuf    = 64   // control plane
 	ingestBuf = 4096 // sized to the worst-case fan-in of simultaneous closes
+
+	// Defaults bound a hostile or misconfigured edge; both are overridable at construction.
+	defaultMaxMembers       = 4096
+	defaultMaxSubscriptions = 128
 )
+
+// HubOption configures resource limits at construction.
+type HubOption func(*Hub)
+
+// WithMaxMembers caps the number of registered members. A member beyond the cap is
+// rejected before any goroutine starts.
+func WithMaxMembers(n int) HubOption {
+	return func(h *Hub) {
+		if n > 0 {
+			h.maxMembers = n
+		}
+	}
+}
+
+// WithMaxSubscriptions caps the number of scopes one member may subscribe to. A member
+// that exceeds it is removed and its connection closed.
+func WithMaxSubscriptions(n int) HubOption {
+	return func(h *Hub) {
+		if n > 0 {
+			h.maxSubscriptions = n
+		}
+	}
+}
 
 // ErrHubStopped reports that an operation that needs the actor could not reach it
 // because the hub has already stopped.
@@ -109,14 +136,16 @@ type Hub struct {
 	opens OpenCandleSource
 	clock func() int64 // ms epoch, injectable
 
-	cmds      chan command
-	ingest    chan ingestMsg
-	openBatch chan []scopedCandle
-	scopeReq  chan chan []Scope
-	statsReq  chan chan Stats
-	parkReq   chan parkRequest
-	done      chan struct{}
-	finished  chan struct{}
+	cmds             chan command
+	ingest           chan ingestMsg
+	openBatch        chan []scopedCandle
+	scopeReq         chan chan []Scope
+	statsReq         chan chan Stats
+	parkReq          chan parkRequest
+	done             chan struct{}
+	finished         chan struct{}
+	maxMembers       int
+	maxSubscriptions int
 
 	// State PRIVATE to run(); no mutex — the actor is the sole owner.
 	members        map[Member]struct{}
@@ -134,26 +163,32 @@ type Hub struct {
 
 // NewHub builds a hub. opens supplies the merged open candle (in-process); clock
 // returns ms epoch (time.Now().UnixMilli in production).
-func NewHub(opens OpenCandleSource, clock func() int64) *Hub {
-	return &Hub{
-		opens:          opens,
-		clock:          clock,
-		cmds:           make(chan command, cmdBuf),
-		ingest:         make(chan ingestMsg, ingestBuf),
-		openBatch:      make(chan []scopedCandle, 1),
-		scopeReq:       make(chan chan []Scope),
-		statsReq:       make(chan chan Stats),
-		parkReq:        make(chan parkRequest),
-		done:           make(chan struct{}),
-		finished:       make(chan struct{}),
-		members:        make(map[Member]struct{}),
-		index:          make(map[Scope]map[Member]struct{}),
-		subs:           make(map[Member]map[Scope]struct{}),
-		closeSeq:       make(map[Scope]uint64),
-		lastOpenLU:     make(map[Scope]int64),
-		lastOpenCandle: make(map[Scope]candle.Candle),
-		lastClosedTs:   make(map[Scope]int64),
+func NewHub(opens OpenCandleSource, clock func() int64, opts ...HubOption) *Hub {
+	h := &Hub{
+		opens:            opens,
+		clock:            clock,
+		cmds:             make(chan command, cmdBuf),
+		ingest:           make(chan ingestMsg, ingestBuf),
+		openBatch:        make(chan []scopedCandle, 1),
+		scopeReq:         make(chan chan []Scope),
+		statsReq:         make(chan chan Stats),
+		parkReq:          make(chan parkRequest),
+		done:             make(chan struct{}),
+		finished:         make(chan struct{}),
+		maxMembers:       defaultMaxMembers,
+		maxSubscriptions: defaultMaxSubscriptions,
+		members:          make(map[Member]struct{}),
+		index:            make(map[Scope]map[Member]struct{}),
+		subs:             make(map[Member]map[Scope]struct{}),
+		closeSeq:         make(map[Scope]uint64),
+		lastOpenLU:       make(map[Scope]int64),
+		lastOpenCandle:   make(map[Scope]candle.Candle),
+		lastClosedTs:     make(map[Scope]int64),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // Start launches the actor and the poller.
@@ -286,6 +321,10 @@ func (h *Hub) run() {
 func (h *Hub) handleCommand(cmd command) {
 	switch cmd.kind {
 	case cmdRegister:
+		if len(h.members) >= h.maxMembers {
+			cmd.m.Reject()
+			return
+		}
 		// Add+start are atomic inside the actor, so they never race connWg.Wait.
 		h.members[cmd.m] = struct{}{}
 		h.subs[cmd.m] = make(map[Scope]struct{})
@@ -366,6 +405,10 @@ func (h *Hub) doSubscribe(m Member, scope Scope) {
 	}
 	if _, ok := h.subs[m][scope]; ok {
 		return // idempotent: a second subscribe must not inject a stale second snapshot
+	}
+	if len(h.subs[m]) >= h.maxSubscriptions {
+		h.removeClient(m)
+		return
 	}
 	// The snapshot carries the seam anchor alongside the cursor.
 	//

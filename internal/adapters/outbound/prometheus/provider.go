@@ -29,7 +29,7 @@ import (
 // Prometheus namespace, subsystem and label names. They are the metric ABI — dashboards
 // and alerts resolve these exact strings — so every collector spells them from one place.
 const (
-	namespaceStreamer = "streamer"
+	namespaceGowhale = "gowhale"
 
 	subsystemStream      = "stream"
 	subsystemStreaming   = "streaming"
@@ -101,32 +101,32 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 
 	// Streaming.
 	streamLiveness := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemStream,
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
 		Name: "liveness",
 		Help: "1 if a healthy connected stream exists for the exchange:market_type scope, else 0",
 	}, []string{labelExchange, labelMarketType})
 	streamSymbolsTotal := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemStream,
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
 		Name: "symbols_total",
 		Help: "Number of monitored (non-TradFi) subscribed symbols per exchange:market_type scope",
 	}, []string{labelExchange, labelMarketType})
 	streamSymbolsStale := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemStream,
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
 		Name: "symbols_stale",
 		Help: "Number of monitored symbols with a stale most-recent persisted candle; TradFi markets follow venue hours and are excluded",
 	}, []string{labelExchange, labelMarketType})
 	startupFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemStreaming,
+		Namespace: namespaceGowhale, Subsystem: subsystemStreaming,
 		Name: "startup_failures_total",
 		Help: "Total startup failures by exchange, market_type, and stage",
 	}, []string{labelExchange, labelMarketType, "stage"})
 	bootSeedConfirmed := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemStreaming,
+		Namespace: namespaceGowhale, Subsystem: subsystemStreaming,
 		Name: "boot_seed_delivery_confirmed",
 		Help: "Symbols whose live stream was confirmed delivering before the boot seed snapshot, per exchange:market_type",
 	}, []string{labelExchange, labelMarketType})
 	bootSeedBlind := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemStreaming,
+		Namespace: namespaceGowhale, Subsystem: subsystemStreaming,
 		Name: "boot_seed_delivery_blind",
 		Help: "Symbols seeded at boot without confirmed stream delivery (grace expired), per exchange:market_type",
 	}, []string{labelExchange, labelMarketType})
@@ -147,77 +147,77 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 
 	// Binance.
 	goroutinesTotal := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "goroutines_total",
 		Help: "Total number of goroutines in the SDKClient by exchange and market type",
 	}, []string{labelExchange, labelMarketType})
 	reconnectAttempts := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "reconnect_attempts_total",
 		Help: "Total number of reconnection attempts by exchange, market type, and reason",
 	}, []string{labelExchange, labelMarketType, labelReason})
 	reconnectFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "reconnect_failures_total",
 		Help: "Total number of failed reconnection attempts by exchange and market type",
 	}, []string{labelExchange, labelMarketType})
 	disconnectCause := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "disconnect_cause_total",
 		Help: "WebSocket disconnects by classified cause (close_<code>/tcp_reset/eof/io_timeout/...), captured from the SDK ErrorChan.",
 	}, []string{labelExchange, labelMarketType, "cause"})
 	lastMessageAge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "last_message_age_seconds",
 		Help: "Age of the last received message in seconds by exchange and market type",
 	}, []string{labelExchange, labelMarketType})
 	partitionStale := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "partition_stale_fraction",
 		Help: "Fraction of a partition's symbols stale per the liveness ledger",
 	}, []string{labelExchange, labelMarketType, "partition"})
 	healthState := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "health_state",
 		Help: "Current health state: 0=healthy, 1=stalled, 2=reconnecting, 3=disconnected",
 	}, []string{labelExchange, labelMarketType})
 	messagesIn := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "messages_in_total",
 		Help: "Total number of messages received by exchange and market type",
 	}, []string{labelExchange, labelMarketType})
 	tradesDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "trades_dropped_total",
 		Help: "Trades LOST by exchange and market type (parse failure, callback panic, or an append refused by a full buffer). Excludes trades that were stored.",
 	}, []string{labelExchange, labelMarketType})
 	tradesIngested := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "trades_ingested_total",
 		Help: "Trades parsed AND buffered by exchange and market type. The ingest numerator: messages_in_total counts frames, this counts trades that survived into a buffer.",
 	}, []string{labelExchange, labelMarketType})
 	reconnectSignalsDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "reconnect_signals_dropped_total",
 		Help: "Total number of reconnect signals dropped because a reconnect was already queued, by exchange and market type",
 	}, []string{labelExchange, labelMarketType})
 	resubscribeIncomplete := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "resubscribe_incomplete_total",
 		Help: "Total symbols not restored after a reconnect (partial fleet restore), by exchange and market type",
 	}, []string{labelExchange, labelMarketType})
 	resubscribeUnverified := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "resubscribe_unverified_total",
 		Help: "Symbols attached but not delivering data within the verification window after a reconnect",
 	}, []string{labelExchange, labelMarketType})
 	dynamicSubscribeDeferred := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "dynamic_subscribe_deferred_total",
 		Help: "Dynamic subscribes deferred because the target partition was not live",
 	}, []string{labelExchange, labelMarketType})
 	starvationSuppressed := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "starvation_suppressed_reconnect_total",
 		Help: "Watchdog reconnects suppressed because all partitions stale coincided with process descheduling",
 	}, []string{labelExchange, labelMarketType})
@@ -293,24 +293,24 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 
 	// Coverage gauges updated by the health aggregation.
 	symbolsConfigured := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "streamer_symbols_configured",
+		Name: "gowhale_symbols_configured",
 		Help: "Symbols the configuration declares for this exchange/market_type.",
 	}, []string{labelExchange, labelMarketType})
 	symbolsEffective := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "streamer_symbols_effective",
-		Help: "Symbols actually subscribed for this exchange/market_type. Below streamer_symbols_configured means a silent coverage deficit.",
+		Name: "gowhale_symbols_effective",
+		Help: "Symbols actually subscribed for this exchange/market_type. Below gowhale_symbols_configured means a silent coverage deficit.",
 	}, []string{labelExchange, labelMarketType})
 	p.healthSink.SymbolsConfigured = func(ex, mt string, n int) { symbolsConfigured.WithLabelValues(ex, mt).Set(float64(n)) }
 	p.healthSink.SymbolsEffective = func(ex, mt string, n int) { symbolsEffective.WithLabelValues(ex, mt).Set(float64(n)) }
 
 	// Venue.
 	lsrShareSumViolation := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "long_short_share_sum_violation_total",
 		Help: "Long/short rows rejected because longAccount + shortAccount did not sum to 1 within tolerance, or because one of the two was absent.",
 	}, []string{labelExchange, labelSymbol, labelReason})
 	capabilityAbsent := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer,
+		Namespace: namespaceGowhale,
 		Name:      "venue_capability_absent_total",
 		Help:      "Requests refused because the venue scope declares the capability absent.",
 	}, []string{labelExchange, labelMarketType, labelCapability})
@@ -325,7 +325,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 
 	// QuestDB.
 	derivativesColdDegraded := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: "derivatives_cold",
+		Namespace: namespaceGowhale, Subsystem: "derivatives_cold",
 		Name: "degraded_rows_total",
 		Help: "Durable derivatives rows written by a degraded cycle, by what the erosion guard " +
 			"chose: preserved (the previous value was carried forward) or hole (the row was " +
@@ -353,7 +353,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 
 	// Redis derivatives.
 	seriesNonFinite := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "series_non_finite_discarded_total",
 		Help: "Numeric fields that are not representable (NaN/±Inf) replaced by ABSENCE at " +
 			"snapshot write, per field. Non-zero means the feed delivered a value that is not " +
@@ -394,33 +394,33 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Help: "Active symbols with NO cold rows at all in the lookback window, per exchange/market_type/timeframe. Invisible to cold_missing_buckets (which only measures holes between a symbol's own first and last row); a value approaching cold_symbols_expected means the cold tier stopped accepting writes.",
 	}, []string{labelExchange, labelMarketType, labelTimeframe})
 	durableRows := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "durable_rows",
 		Help: "Rows in the durable table per timeframe.",
 	}, []string{labelTimeframe})
 	durableMissingBuckets := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "durable_missing_buckets",
 		Help: "Buckets with NO row between the oldest and the newest of the timeframe. This is TABLE continuity, not per-symbol continuity.",
 	}, []string{labelTimeframe})
 	durableColumnCovered := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "durable_column_covered",
 		Help: "1 when the declared column carries a non-null row AND the durable read reaches it, 0 otherwise. Coverage is written ∧ readable.",
 	}, []string{labelTimeframe, "column"})
 	durableTimeframeCovered := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "durable_timeframe_covered",
 		Help: "1 when the declared coverage timeframe has at least one durable row, 0 otherwise.",
 	}, []string{labelTimeframe})
 	durableIncoherentFunding := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "durable_incoherent_funding_rows",
 		Help: "Rows with funding_rate_8h under an n_step that does not authorize normalization. " +
 			"This is GROUP coherence: per-column filling counts these rows as healthy.",
 	}, []string{labelTimeframe})
 	durableDimensionsMeasured := prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "durable_dimensions_measured",
 		Help: "How many of the required integrity dimensions the last pass actually measured.",
 	})
@@ -475,63 +475,63 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 
 	// Derivatives collector.
 	feedAvailable := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "feed_available",
 		Help: "Whether a source serves a timeframe for a feed: 1 available, 0 unavailable. A cell never measured is absent rather than 0.",
 	}, []string{"source", labelFeed, labelTimeframe})
 	feedRequest := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "feed_request_total",
 		Help: "Bootstrap history requests by outcome: points, empty, empty_undeclared, unsupported, error. Distinguishes a period the provider does not serve from a legitimate collection of zero items.",
 	}, []string{labelExchange, labelFeed, labelTimeframe, labelOutcome})
 	collectedPoints := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "collected_points",
 		Help: "Points the bootstrap assembled for a (symbol, feed, timeframe) — the depth actually reached, not the depth requested.",
 	}, []string{labelExchange, labelFeed, labelSymbol, labelTimeframe})
 	collectedSpan := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "collected_span_seconds",
 		Help: "Seconds between the oldest and the newest point the bootstrap assembled for a (symbol, feed, timeframe).",
 	}, []string{labelExchange, labelFeed, labelSymbol, labelTimeframe})
 	historyPages := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "history_pages_total",
 		Help: "REST pages issued by the backward-walking history pagination, per feed and timeframe.",
 	}, []string{labelExchange, labelFeed, labelTimeframe})
 	fundingIntervalComparison := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "funding_interval_comparison_total",
 		Help: "Comparisons between the MEASURED settlement spacing and the interval the exchange DECLARES: agree, diverge, no_measurement, no_metadata.",
 	}, []string{labelExchange, "result"})
 	fundingIntervalMeasurement := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "funding_interval_measurement_total",
 		Help: "Outcome of each attempt to MEASURE the settlement spacing: measured, fetch_error, empty_history, too_few_settlements, no_known_cadence.",
 	}, []string{labelExchange, labelOutcome})
 	fundingProfileEntries := prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "funding_profile_registry_entries",
 		Help: "How many entries the funding profile registry has NOW.",
 	})
 	fundingIntervalDivergence := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemDerivatives,
+		Namespace: namespaceGowhale, Subsystem: subsystemDerivatives,
 		Name: "funding_interval_divergence_total",
 		Help: "Observations where the measured settlement spacing disagrees with the declared fundingIntervalHours. The measured value wins; this counts how often the metadata was wrong.",
 	}, []string{labelExchange, labelSymbol, "measured_hours", "declared_hours"})
 
 	coinalyzeCallsSpent := prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemCoinalyze,
+		Namespace: namespaceGowhale, Subsystem: subsystemCoinalyze,
 		Name: "calls_spent_total",
 		Help: "Coinalyze API calls this process debited from its local budget, charged per symbol and per attempt.",
 	})
 	coinalyzeRateRefusals := prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemCoinalyze,
+		Namespace: namespaceGowhale, Subsystem: subsystemCoinalyze,
 		Name: "rate_refusals_total",
 		Help: "HTTP 429 responses received from Coinalyze.",
 	})
 	coinalyzeExternalQuotaRefusals := prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemCoinalyze,
+		Namespace: namespaceGowhale, Subsystem: subsystemCoinalyze,
 		Name: "external_quota_refusals_total",
 		Help: "HTTP 429 responses that arrived while this process was emitting under its own per-minute ceiling. They cannot be explained by local emission: the API key is shared with another consumer.",
 	})
@@ -621,7 +621,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 
 	// Netdiag.
 	reconnectScope := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: "netdiag",
+		Namespace: namespaceGowhale, Subsystem: "netdiag",
 		Name: "reconnect_scope_total",
 		Help: "Reconnects classified by blast radius: local_network (>=2 exchanges dropped within the correlation window) vs exchange_specific.",
 	}, []string{labelExchange, "scope"})
@@ -644,7 +644,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Buckets: []float64{1, 4, 16, 64, 256, 1024, 4096},
 	}, []string{labelExchange, labelMarketType})
 	periodicBackstop := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "streamer_periodic_backstop_enqueue_total",
+		Name: "gowhale_periodic_backstop_enqueue_total",
 		Help: "Staleness-gated periodic backstop enqueues with no preceding disconnect for the scope. ~0 in steady state proves the event-driven recovery path is sufficient.",
 	}, []string{labelExchange, labelMarketType})
 	noProgress := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -664,7 +664,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Help: "Gap-recovery jobs whose explicit [since, until] window was honored because it ends at or before the ring head — an interior repair, not a catch-up. Without this the worker re-derives [latest, now] and a request for one older bucket becomes a no-op that reports success.",
 	}, []string{labelExchange, labelMarketType, labelTimeframe})
 	openBucketSnapshotLag := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: namespaceStreamer, Subsystem: "seed",
+		Namespace: namespaceGowhale, Subsystem: "seed",
 		Name:    "open_bucket_snapshot_lag_ms",
 		Help:    "Milliseconds between issuing the seed klines request and applying its open bucket — the irreducible uncovered window",
 		Buckets: []float64{10, 25, 50, 100, 200, 400, 800, 1600, 3200},
@@ -686,13 +686,13 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 
 	// App-owned metrics: exposed as granular functions so this adapter does not import app.
 	coinalyzeCycleSeconds := prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemCoinalyze,
+		Namespace: namespaceGowhale, Subsystem: subsystemCoinalyze,
 		Name:    "cycle_duration_seconds",
 		Help:    "Duration of one Coinalyze collection cycle. The cycle runs synchronously inside the scheduling ticker's select, so a cycle longer than the interval makes the runtime drop ticks instead of queueing them.",
 		Buckets: prometheus.ExponentialBuckets(30, 2, 10),
 	})
 	coinalyzeCycleOverrun := prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: namespaceStreamer, Subsystem: subsystemCoinalyze,
+		Namespace: namespaceGowhale, Subsystem: subsystemCoinalyze,
 		Name: "cycle_overrun_total",
 		Help: "Coinalyze collection cycles that outlasted their configured interval. Each one costs at least one dropped scheduling tick.",
 	})

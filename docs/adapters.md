@@ -36,7 +36,7 @@ permanent error.
 Requests dispatch through a `driver` resolved by `registry.go` for the
 `(exchange, market type)` scope. `Client` keeps the public signatures and
 delegates every venue request; a driver that cannot serve a capability
-declares it in the matrix and returns `ErrCapabilityAbsent`.
+declares it in the matrix and returns `CapabilityAbsentError`.
 
 ## Porting checklist
 
@@ -54,7 +54,7 @@ same for every scope:
 3. **Capabilities.** Add the matrix row in `internal/market/capability.go`.
    Every capability the reference scope (Binance USD-M futures) has must be
    present or declared absent with a reason, and the driver must return
-   `ErrCapabilityAbsent` from the method.
+   `CapabilityAbsentError` from the method.
 4. **Integrity.** The driver returns canonical `candle.Candle`. Normalization
    and rejection happen once at the write gate (`recovery.prepareCandles`),
    never per venue.
@@ -68,7 +68,7 @@ same for every scope:
 `contract_test.go` runs one table for the four scopes. For every capability the
 matrix declares present, a recorded fixture must answer with a typed,
 non-empty result. For every driver capability declared absent, the method must
-return `ErrCapabilityAbsent` and record the `capability_absent` metric. Listing
+return `CapabilityAbsentError` and record the `venue_capability_absent_total` metric. Listing
 floors must come from the matrix, and a venue row with impossible OHLC must be
 normalized, not dropped: the fixture is the real BCHUSDT 1w line from
 2020-01-13.
@@ -115,9 +115,6 @@ Zero means the venue does not document the value.
   venue, which is another budget and another design.
 - **Consolidating `exchange.RestBudget` and the pacer into the driver.** The
   refactor moves the request bodies; it does not redesign the budget.
-- **The dynamic `SUBSCRIBE` path without a combined URL.** It is not validated
-  end to end; a dedicated probe must run before
-  `GOWHALE_BINANCE_COMBINED_URL_CONNECT` is turned off.
 
 ## Adding a persistence or venue adapter
 

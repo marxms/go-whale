@@ -12,7 +12,9 @@ parse or validation errors are returned, never replaced by environment values.
 3. environment-only mode when neither is set
 
 Within a loaded file, `GOWHALE_*` environment variables override the matching
-values. Secrets are environment only.
+values. The published examples keep secrets in the environment; the YAML loader
+also accepts `redis.password` and `questdb.pg_password`, and an environment
+variable wins when both are set.
 
 ## Sections
 
@@ -39,6 +41,7 @@ files live outside the product tree and are mounted read-only at deploy time.
 | `GOWHALE_CONFIG_FILE` | YAML path when no `--config` is given |
 | `GOWHALE_SERVER_PORT` | HTTP port |
 | `GOWHALE_LOG_LEVEL` | `debug`, `info`, `warn`, `error` |
+| `GOWHALE_LOG_FORMAT` | `text` or `json` |
 
 ### Redis
 
@@ -71,7 +74,7 @@ The production host is the only supported source, in every environment. The
 this project, because its prices track production while its volume, trade count
 and taker split come from a synthetic order book (measured 2026-11-07: BCH 15m
 reported 4.7M BCH over 4,031 trades, ~1,164 BCH/trade, against ~0.5 BCH/trade on
-production). The streamer warns loudly at boot if one is configured, and no
+production). GoWhale warns loudly at boot if one is configured, and no
 environment should set it. An unreachable production stream is a network
 incident to report, not a reason to switch venues.
 
@@ -80,11 +83,20 @@ incident to report, not a reason to switch venues.
 | Variable | Meaning |
 | --- | --- |
 | `GOWHALE_REALTIME_CHANNEL_PREFIX` | Pub/Sub prefix, default `gowhale:realtime` |
-| `GOWHALE_REALTIME_WS_TICKET_SECRET` | HMAC secret for WS tickets |
+| `GOWHALE_REALTIME_WS_TICKET_SECRET` | HMAC secret for WS tickets; empty disables the edge |
+| `GOWHALE_REALTIME_WS_MINT_TOKEN` | server-to-gateway secret for the ticket-mint endpoint; both WS secrets are required |
 | `GOWHALE_REALTIME_WS_TICKET_TTL_S` | ticket lifetime |
 | `GOWHALE_REALTIME_WS_ALLOWED_ORIGINS` | comma-separated origin allow-list |
 | `GOWHALE_REALTIME_WS_MAX_CONN_AGE_S` | maximum session age |
+| `GOWHALE_REALTIME_WS_MAX_CONNECTIONS` | global WS connection cap, default `4096` |
+| `GOWHALE_REALTIME_WS_MAX_SCOPES_PER_CONNECTION` | per-connection subscription cap, default `128` |
 | `GOWHALE_REALTIME_WS_AUTH_DISABLED` | explicit local-only auth disable |
+
+The WebSocket edge mounts only when **both** `GOWHALE_REALTIME_WS_TICKET_SECRET` and
+`GOWHALE_REALTIME_WS_MINT_TOKEN` are set to at least 32 random bytes. The
+authenticating gateway must inject `X-Gowhale-Mint-Token` on `/api/ws-ticket`; the
+mint endpoint is not a user-auth boundary by itself. Empty secrets disable the edge.
+Placeholders such as `replace-with-…` are rejected at boot.
 
 ### Discovery and subscriptions
 

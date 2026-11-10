@@ -16,6 +16,12 @@ cmd/gowhale
           internal/market, internal/derivatives   domain
 ```
 
+The import-boundary gate covers the four pure domain packages (`market`, `trade`,
+`candle`, `derivatives`). `candle/engine` and the adapters are deliberate layers:
+the engine may import the Redis adapter and the configuration, and the inbound HTTP
+adapter may import the Redis adapter. That is a layer boundary, not a domain-purity
+violation; the gate is narrower than the whole tree by design.
+
 ## Domain
 
 - `market` owns exchange vocabulary, market types and timeframes. Timeframes

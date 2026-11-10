@@ -19,7 +19,7 @@ jobs:
 
     services:
       redis:
-        image: redis:8.4.0-bookworm
+        image: redis:8.4.0-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78
         ports:
           - 6379:6379
         options: >-
@@ -29,7 +29,7 @@ jobs:
           --health-retries 12
 
       questdb:
-        image: questdb/questdb:8.2.3
+        image: questdb/questdb:8.2.3@sha256:1e109276b61087010d8a3a0b033c313fcb26f6af898cbdc30f53e51cf494d0c5
         ports:
           - 9000:9000
           - 8812:8812
@@ -37,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # The image ships no curl; a timed-out wait is a failure, never a silent pass.
       - name: Wait for QuestDB
@@ -92,6 +94,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Compose smoke
         run: |

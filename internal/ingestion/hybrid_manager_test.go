@@ -15,7 +15,7 @@ func (n noopTradeHandler) HandleTrades(_ string, _ any) error {
 	return nil
 }
 
-func (n noopTradeHandler) HandleTradesWithContext(_, _, _ string, _ any) error {
+func (n noopTradeHandler) HandleTradesWithContext(_ context.Context, _, _, _ string, _ any) error {
 	return nil
 }
 

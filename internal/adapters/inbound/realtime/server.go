@@ -1,6 +1,7 @@
 package realtime
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -15,6 +16,7 @@ import (
 type Server struct {
 	hub            *Hub
 	ticketSecret   []byte
+	mintToken      []byte
 	allowedOrigins map[string]struct{}
 	ticketTTL      time.Duration
 	clock          func() int64
@@ -24,12 +26,14 @@ type Server struct {
 
 // NewServer builds the WS edge. allowedOrigins is the exact set of browser origins
 // permitted (e.g. "https://app.example.com"); an empty set rejects everything (fail
-// closed). ticketSecret signs/validates connection tickets.
+// closed). ticketSecret signs/validates connection tickets. mintToken is the
+// server-to-gateway secret required by MintTicket: the authenticating gateway injects
+// X-Gowhale-Mint-Token after it has authenticated the user.
 //
 // authDisabled is the LOCAL/INTRANET escape hatch: when true the handshake skips BOTH the ticket
 // check and the Origin allow-list (network trust replaces app auth on a trusted LAN). It must be an
 // explicit, deliberate opt-in — never inferred from an empty secret — so production stays fail-closed.
-func NewServer(hub *Hub, ticketSecret []byte, allowedOrigins []string, ticketTTL time.Duration, clock func() int64, authDisabled bool) *Server {
+func NewServer(hub *Hub, ticketSecret, mintToken []byte, allowedOrigins []string, ticketTTL time.Duration, clock func() int64, authDisabled bool) *Server {
 	origins := make(map[string]struct{}, len(allowedOrigins))
 	for _, o := range allowedOrigins {
 		if o != "" {
@@ -39,6 +43,7 @@ func NewServer(hub *Hub, ticketSecret []byte, allowedOrigins []string, ticketTTL
 	s := &Server{
 		hub:            hub,
 		ticketSecret:   ticketSecret,
+		mintToken:      mintToken,
 		allowedOrigins: origins,
 		ticketTTL:      ticketTTL,
 		clock:          clock,
@@ -92,12 +97,13 @@ func (s *Server) ServeWS(w http.ResponseWriter, r *http.Request) {
 	s.hub.add(newClient(conn, s.hub.eventsBufSize))
 }
 
-// MintTicket issues a short-lived ticket. It MUST be mounted behind the gateway's
-// auth_request — reaching this handler means the caller is already authenticated, so a
-// ticket is granted. The client then opens the WS with ?ticket=<value>.
-func (s *Server) MintTicket(w http.ResponseWriter, _ *http.Request) {
+// MintTicket issues a short-lived ticket. The authenticating gateway MUST verify the
+// user and inject X-Gowhale-Mint-Token before proxying this request; the handler itself
+// is not a user-auth boundary. The browser then opens the WS with ?ticket=<value>.
+func (s *Server) MintTicket(w http.ResponseWriter, r *http.Request) {
 	expiry := s.clock() + s.ticketTTL.Milliseconds()
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	// LOCAL/INTRANET: return a placeholder ticket (200) so the browser's unchanged fetch-then-connect
 	// flow works; ServeWS ignores the ticket in this mode.
 	if s.authDisabled {
@@ -107,8 +113,12 @@ func (s *Server) MintTicket(w http.ResponseWriter, _ *http.Request) {
 		}{Ticket: "noauth", ExpiresAt: expiry})
 		return
 	}
-	if len(s.ticketSecret) == 0 {
+	if len(s.ticketSecret) == 0 || len(s.mintToken) == 0 {
 		http.Error(w, "stream auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Gowhale-Mint-Token")), s.mintToken) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(struct {

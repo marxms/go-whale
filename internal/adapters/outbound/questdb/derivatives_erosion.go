@@ -18,7 +18,7 @@ import (
 // The label is WHAT WAS CHOSEN, and only that: `preserved` means the old data survived the
 // rewrite, `hole` means the NEW data did not enter.
 //
-//	rate(streamer_derivatives_cold_degraded_rows_total{outcome="hole"}[6h]) > 0
+//	rate(gowhale_derivatives_cold_degraded_rows_total{outcome="hole"}[6h]) > 0
 const (
 	outcomePreserved = "preserved"
 	outcomeHole      = "hole"

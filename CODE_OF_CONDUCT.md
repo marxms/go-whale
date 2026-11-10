@@ -34,11 +34,12 @@ where someone represents the project.
 
 ## Reporting
 
-Do not open a public issue for a conduct report. Use GitHub's private reporting on
-this repository (**Security → Report a vulnerability**) and mark the report as a
-conduct report. It will be handled separately from a security disclosure. If the
-report involves a maintainer, say so explicitly so another maintainer can handle
-it.
+Do not open a public issue with sensitive details for a conduct report. Use
+GitHub's private reporting on this repository (**Security → Report a
+vulnerability**) and mark the report as a conduct report; it will be handled
+separately from a security disclosure. If the report involves the only maintainer,
+say so explicitly so the escalation is visible. If the private form is unavailable,
+open a minimal issue asking for a private contact and do not include the details.
 
 ## Enforcement guidelines
 

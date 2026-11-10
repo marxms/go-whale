@@ -326,3 +326,50 @@ func TestHubOpenConflationAndDeleteOnClose(t *testing.T) {
 		return !stillPending
 	}, "delete-on-close must retract the pending open for the bucket that just closed")
 }
+
+func TestHubRejectsMembersBeyondTheConnectionCap(t *testing.T) {
+	h := NewHub(newFakeOpens(), func() int64 { return 1 }, WithMaxMembers(1))
+	h.Start()
+	defer stopTestHub(t, h)
+
+	first := newFakeMember(8)
+	h.Register(first)
+	waitFor(t, func() bool {
+		first.mu.Lock()
+		defer first.mu.Unlock()
+		return first.started
+	}, "the first member was never registered")
+
+	second := newFakeMember(8)
+	h.Register(second)
+	waitFor(t, func() bool {
+		second.mu.Lock()
+		defer second.mu.Unlock()
+		return second.rejected
+	}, "a member beyond the cap must be rejected, not silently owned")
+	if h.SnapshotStats().Clients != 1 {
+		t.Fatalf("clients = %d, want the cap of 1", h.SnapshotStats().Clients)
+	}
+}
+
+func TestHubRemovesMembersBeyondTheSubscriptionCap(t *testing.T) {
+	h := NewHub(newFakeOpens(), func() int64 { return 1 }, WithMaxSubscriptions(1))
+	h.Start()
+	defer stopTestHub(t, h)
+
+	m := newFakeMember(8)
+	h.Register(m)
+	waitFor(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.started
+	}, "the member was never registered")
+
+	h.Subscribe(m, testScope("AAA/USDT"))
+	if _, ok := recvFrame(t, m.lane, testWait); !ok {
+		t.Fatal("the first subscribe never produced a snapshot")
+	}
+	h.Subscribe(m, testScope("BBB/USDT"))
+	waitFor(t, func() bool { return h.SnapshotStats().Clients == 0 },
+		"a member beyond the subscription cap must be removed")
+}

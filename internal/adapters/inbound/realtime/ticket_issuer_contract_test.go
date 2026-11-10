@@ -27,7 +27,7 @@ import (
 // only possible fix is for the client to ask the right issuer.
 
 // mintAnalyzerFormatTicket reproduces
-// `apps/analyzer/src/services/realtime/indicator-sse-ticket.ts` byte for byte. It lives here
+// the legacy analyzer ticket format byte for byte. It lives here
 // and not in a fixture because a frozen fixture would not flag a future change in the analyzer
 // issuer; this function is its executable specification.
 func mintAnalyzerFormatTicket(secret []byte, expiryMs int64) string {

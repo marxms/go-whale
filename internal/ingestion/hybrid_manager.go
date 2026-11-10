@@ -513,8 +513,8 @@ func (m *HybridManager) processClient(ctx context.Context, _ int, state *HybridC
 		return // No new trades
 	}
 
-	// Use HandleTradesWithContext to pass exchange and marketType
-	if err := m.handler.HandleTradesWithContext(state.Exchange, string(state.MarketType), state.Symbol, trades); err != nil {
+	// Carry the worker context into persistence so cancellation stops the write.
+	if err := m.handler.HandleTradesWithContext(ctx, state.Exchange, string(state.MarketType), state.Symbol, trades); err != nil {
 		logger.OrDiscard(m.log).Error("hybrid manager: handle trades failed", "key", state.Key, "error", err)
 	}
 }

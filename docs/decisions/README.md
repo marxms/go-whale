@@ -26,4 +26,4 @@ were not renumbered. A missing number does not imply a missing decision.
 | [0033](0033-cold-write-transport-failures.md) | Treat cold-write transport failures as a recoverable process condition | Accepted |
 | [0040](0040-single-resident-depth.md) | One resident depth constant, enforced by a conformance test | Accepted |
 | [0041](0041-member-lane-fanout-cost.md) | Hub fan-out keeps the transport-free Member/Lane seam | Accepted |
-| [0042](0042-open-tick-benchmark-path.md) | OpenTickEndToEnd measures the real poll path since T41 | Accepted |
+| [0042](0042-open-tick-benchmark-path.md) | OpenTickEndToEnd measures the real poll path since the fan-out change | Accepted |

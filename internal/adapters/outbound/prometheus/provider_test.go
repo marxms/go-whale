@@ -45,11 +45,11 @@ func TestNew_TwoRegistriesAreIsolated(t *testing.T) {
 
 	p1.Streaming().SetLiveness("binance", "future", true)
 
-	found1 := gatherFamily(t, reg1, "streamer_stream_liveness")
+	found1 := gatherFamily(t, reg1, "gowhale_stream_liveness")
 	if found1 == nil {
-		t.Fatal("registry 1 did not expose streamer_stream_liveness after a write")
+		t.Fatal("registry 1 did not expose gowhale_stream_liveness after a write")
 	}
-	if found2 := gatherFamily(t, reg2, "streamer_stream_liveness"); found2 != nil {
+	if found2 := gatherFamily(t, reg2, "gowhale_stream_liveness"); found2 != nil {
 		t.Fatal("registry 2 exposes a series written through provider 1 — the registries are not isolated")
 	}
 	if got := testFloat(t, found1); got != 1 {
@@ -101,8 +101,8 @@ func TestMetricsRoute_ServesRepresentativeSeries(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		"streamer_stream_liveness",
-		"streamer_binancesdk_messages_in_total",
+		"gowhale_stream_liveness",
+		"gowhale_binancesdk_messages_in_total",
 		"trades_missing_total",
 		"gaprecovery_no_progress_total",
 		"go_gc_cpu_fraction",
@@ -130,47 +130,47 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 
 	expected := []string{
 		// streaming
-		"streamer_stream_liveness", "streamer_stream_symbols_total", "streamer_stream_symbols_stale",
-		"streamer_streaming_startup_failures_total", "streamer_streaming_boot_seed_delivery_confirmed",
-		"streamer_streaming_boot_seed_delivery_blind",
+		"gowhale_stream_liveness", "gowhale_stream_symbols_total", "gowhale_stream_symbols_stale",
+		"gowhale_streaming_startup_failures_total", "gowhale_streaming_boot_seed_delivery_confirmed",
+		"gowhale_streaming_boot_seed_delivery_blind",
 		// binance
-		"streamer_binancesdk_goroutines_total", "streamer_binancesdk_reconnect_attempts_total",
-		"streamer_binancesdk_reconnect_failures_total", "streamer_binancesdk_disconnect_cause_total",
-		"streamer_binancesdk_last_message_age_seconds", "streamer_binancesdk_partition_stale_fraction",
-		"streamer_binancesdk_health_state", "streamer_binancesdk_messages_in_total",
-		"streamer_binancesdk_trades_dropped_total", "streamer_binancesdk_trades_ingested_total",
-		"streamer_binancesdk_reconnect_signals_dropped_total", "streamer_binancesdk_resubscribe_incomplete_total",
-		"streamer_binancesdk_resubscribe_unverified_total", "streamer_binancesdk_dynamic_subscribe_deferred_total",
-		"streamer_binancesdk_starvation_suppressed_reconnect_total",
+		"gowhale_binancesdk_goroutines_total", "gowhale_binancesdk_reconnect_attempts_total",
+		"gowhale_binancesdk_reconnect_failures_total", "gowhale_binancesdk_disconnect_cause_total",
+		"gowhale_binancesdk_last_message_age_seconds", "gowhale_binancesdk_partition_stale_fraction",
+		"gowhale_binancesdk_health_state", "gowhale_binancesdk_messages_in_total",
+		"gowhale_binancesdk_trades_dropped_total", "gowhale_binancesdk_trades_ingested_total",
+		"gowhale_binancesdk_reconnect_signals_dropped_total", "gowhale_binancesdk_resubscribe_incomplete_total",
+		"gowhale_binancesdk_resubscribe_unverified_total", "gowhale_binancesdk_dynamic_subscribe_deferred_total",
+		"gowhale_binancesdk_starvation_suppressed_reconnect_total",
 		"kline_feed_frames_total", "kline_feed_frames_rejected_total", "kline_feed_symbols_attached",
 		// realtime
 		"realtime_publish_dropped_total",
 		// coverage
-		"streamer_symbols_configured", "streamer_symbols_effective",
+		"gowhale_symbols_configured", "gowhale_symbols_effective",
 		// derivatives adapters
-		"streamer_derivatives_long_short_share_sum_violation_total",
-		"streamer_derivatives_cold_degraded_rows_total",
+		"gowhale_derivatives_long_short_share_sum_violation_total",
+		"gowhale_derivatives_cold_degraded_rows_total",
 		"cold_pipeline_blocked", "cold_pipeline_pending_rows", "cold_seed_noop_rows_total",
 		"cold_last_flush_age_seconds",
-		"streamer_derivatives_series_non_finite_discarded_total",
+		"gowhale_derivatives_series_non_finite_discarded_total",
 		// candle engine
 		"candle_warm_seed_total", "candle_delta_inside_horizon_total", "engine_applied_delta_volume_total",
 		"cold_missing_buckets", "cold_symbols_with_gaps", "cold_symbols_expected", "cold_symbols_absent",
-		"streamer_derivatives_durable_rows", "streamer_derivatives_durable_missing_buckets",
-		"streamer_derivatives_durable_column_covered", "streamer_derivatives_durable_timeframe_covered",
-		"streamer_derivatives_durable_incoherent_funding_rows", "streamer_derivatives_durable_dimensions_measured",
+		"gowhale_derivatives_durable_rows", "gowhale_derivatives_durable_missing_buckets",
+		"gowhale_derivatives_durable_column_covered", "gowhale_derivatives_durable_timeframe_covered",
+		"gowhale_derivatives_durable_incoherent_funding_rows", "gowhale_derivatives_durable_dimensions_measured",
 		"candle_seed_ancestor_revisions_unconfirmed_total", "candle_late_update_total",
 		"candle_seed_merge_total", "candle_seed_ancestor_unadmitted_evicted_series_total",
 		"candle_seed_ancestor_outside_cold_retention_total", "cold_append_aborted_total",
 		// derivatives collector
-		"streamer_derivatives_feed_available", "streamer_derivatives_feed_request_total",
-		"streamer_derivatives_collected_points", "streamer_derivatives_collected_span_seconds",
-		"streamer_derivatives_history_pages_total", "streamer_derivatives_funding_interval_comparison_total",
-		"streamer_derivatives_funding_interval_measurement_total",
-		"streamer_derivatives_funding_profile_registry_entries",
-		"streamer_derivatives_funding_interval_divergence_total",
-		"streamer_coinalyze_calls_spent_total", "streamer_coinalyze_rate_refusals_total",
-		"streamer_coinalyze_external_quota_refusals_total",
+		"gowhale_derivatives_feed_available", "gowhale_derivatives_feed_request_total",
+		"gowhale_derivatives_collected_points", "gowhale_derivatives_collected_span_seconds",
+		"gowhale_derivatives_history_pages_total", "gowhale_derivatives_funding_interval_comparison_total",
+		"gowhale_derivatives_funding_interval_measurement_total",
+		"gowhale_derivatives_funding_profile_registry_entries",
+		"gowhale_derivatives_funding_interval_divergence_total",
+		"gowhale_coinalyze_calls_spent_total", "gowhale_coinalyze_rate_refusals_total",
+		"gowhale_coinalyze_external_quota_refusals_total",
 		// health redis budget
 		"redis_budget_occupancy_ratio", "redis_budget_keys_without_ttl", "redis_budget_keys_total",
 		"redis_budget_evicted_keys", "redis_budget_alert",
@@ -178,15 +178,15 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 		"trades_discarded_total", "trades_missing_total", "trades_missing_tail_total",
 		"stream_admitted_volume_total",
 		// netdiag
-		"streamer_netdiag_reconnect_scope_total",
+		"gowhale_netdiag_reconnect_scope_total",
 		// recovery
 		"gap_recovery_validation_total", "gap_recovery_validation_failed",
-		"gap_recovery_missing_buckets", "streamer_periodic_backstop_enqueue_total",
+		"gap_recovery_missing_buckets", "gowhale_periodic_backstop_enqueue_total",
 		"gaprecovery_no_progress_total", "gaprecovery_suspended_symbols",
 		"gaprecovery_rest_budget_deferred_total", "gap_recovery_targeted_repair_total",
-		"streamer_seed_open_bucket_snapshot_lag_ms",
+		"gowhale_seed_open_bucket_snapshot_lag_ms",
 		// app
-		"streamer_coinalyze_cycle_duration_seconds", "streamer_coinalyze_cycle_overrun_total",
+		"gowhale_coinalyze_cycle_duration_seconds", "gowhale_coinalyze_cycle_overrun_total",
 		"candle_boot_bucket_settle_total", "candle_gapped_bucket_repair_total",
 		// process-level custom gauges
 		"go_gc_cpu_fraction", "go_gc_headroom_ratio",
@@ -205,9 +205,9 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 		t.Fatalf("inventory has %d names, want the 90 definitions T44 moved", len(expected))
 	}
 	// The histogram bucket boundaries are part of the wire contract.
-	assertBuckets(t, reg, "streamer_coinalyze_cycle_duration_seconds", []float64{30, 60, 120, 240, 480, 960, 1920, 3840, 7680, 15360})
+	assertBuckets(t, reg, "gowhale_coinalyze_cycle_duration_seconds", []float64{30, 60, 120, 240, 480, 960, 1920, 3840, 7680, 15360})
 	assertBuckets(t, reg, "gap_recovery_missing_buckets", []float64{1, 4, 16, 64, 256, 1024, 4096})
-	assertBuckets(t, reg, "streamer_seed_open_bucket_snapshot_lag_ms", []float64{10, 25, 50, 100, 200, 400, 800, 1600, 3200})
+	assertBuckets(t, reg, "gowhale_seed_open_bucket_snapshot_lag_ms", []float64{10, 25, 50, 100, 200, 400, 800, 1600, 3200})
 }
 
 func TestReadGCCPUFraction_ReportsTheRuntimeNumber(t *testing.T) {

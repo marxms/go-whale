@@ -6,12 +6,12 @@ import (
 	"runtime/debug"
 )
 
-// The linker overrides these values in release builds. The defaults keep
-// `go run ./cmd/gowhale version` useful without a special build.
+// The linker overrides these values in release builds. The "devel" default keeps
+// `go run` honest and lets `go install @vX.Y.Z` fall back to the module version.
 //
 //nolint:gochecknoglobals // set by -ldflags in release builds.
 var (
-	Version = "0.1.0"
+	Version = "devel"
 	Commit  = "unknown"
 	Date    = "unknown"
 )
@@ -32,7 +32,7 @@ func Current() Info {
 	if !ok {
 		return info
 	}
-	if info.Version == "0.1.0" && build.Main.Version != "" && build.Main.Version != "(devel)" {
+	if info.Version == "devel" && build.Main.Version != "" && build.Main.Version != "(devel)" {
 		info.Version = build.Main.Version
 	}
 	for _, setting := range build.Settings {

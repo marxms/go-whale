@@ -121,7 +121,7 @@ func TestApplyDefaults(t *testing.T) {
 		got      interface{}
 		expected interface{}
 	}{
-		{"Port", cfg.Port, "3001"},
+		{"Port", cfg.Port, "3000"},
 		{"LogLevel", cfg.LogLevel, "info"},
 		{"LogFormat", cfg.LogFormat, "text"},
 		{"RedisAddr", cfg.RedisAddr, "localhost:6379"},
@@ -349,5 +349,49 @@ func TestValidateAcceptsKnownExchangeAndSymbols(t *testing.T) {
 
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("expected no error for known exchange and canonical symbols, got: %v", err)
+	}
+}
+
+func TestValidateRealtimeEdgeSecrets(t *testing.T) {
+	strong := strings.Repeat("a", 32)
+	base := func() Config {
+		return Config{
+			Port:         "3000",
+			RedisAddr:    "localhost:6379",
+			CandleEngine: CandleEngineConfig{Timeframes: []string{"5m"}},
+		}
+	}
+	cases := []struct {
+		name         string
+		ticket       string
+		mint         string
+		authDisabled bool
+		want         string
+	}{
+		{name: "both strong", ticket: strong, mint: strong},
+		{name: "both empty disables the edge"},
+		{name: "explicit local escape", authDisabled: true},
+		{name: "missing mint token", ticket: strong, want: "BOTH"},
+		{name: "short ticket", ticket: "short", mint: strong, want: "at least 32"},
+		{name: "placeholder ticket", ticket: "replace-with-a-long-random-secret", mint: strong, want: "placeholder"},
+		{name: "placeholder mint", ticket: strong, mint: strings.Repeat("replace-with-", 4), want: "placeholder"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			cfg.RealtimeWSTicketSecret = tc.ticket
+			cfg.RealtimeWSMintToken = tc.mint
+			cfg.RealtimeWSAuthDisabled = tc.authDisabled
+			err := Validate(cfg)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() = %v, want error containing %q", err, tc.want)
+			}
+		})
 	}
 }

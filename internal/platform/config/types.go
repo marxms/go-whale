@@ -38,7 +38,7 @@ type ExchangeLimitsConfig struct {
 
 // DiscoveryConfig defines asset discovery settings.
 // max_assets follows standard YAML inheritance: base config.yaml sets the
-// production ceiling, and per-environment files (e.g. config.local.yaml) may
+// production ceiling, and per-environment files (e.g. a local configuration file) may
 // lower it. This is intentional — local dev needs fewer assets than production.
 type DiscoveryConfig struct {
 	Enabled         bool   `yaml:"enabled" json:"enabled"`

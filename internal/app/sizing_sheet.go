@@ -50,7 +50,7 @@ func (a *App) logSizingSheet(ctx context.Context) {
 	}
 
 	sheet := ops.BuildSheetFrom(ctx, ops.SheetInput{
-		Service:           ops.ServiceStreamer,
+		Service:           ops.ServiceGoWhale,
 		Client:            client,
 		UniverseCount:     universe,
 		UniverseSource:    source,

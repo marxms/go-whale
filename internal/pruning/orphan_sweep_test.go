@@ -117,14 +117,10 @@ func (f *fakeKeyspace) UnlinkKeys(_ context.Context, keys ...string) (int64, err
 // distinguishes the sweep from disaster is the other side: how many ACTIVE keys survived. That is
 // why every case here seeds N active + M orphans and asserts the whole surviving set.
 
-// symbolFamilies returns ONE symbol's keys across all swept families.
+// symbolFamilies returns ONE symbol's keys across the families this service owns and
+// the orphan sweep covers. Foreign application families are deliberately absent.
 func symbolFamilies(symbol string) []string {
 	return []string{
-		fmt.Sprintf("indicators:binance:future:%s:1h:wt1", symbol),
-		fmt.Sprintf("indicators:%s:1h:mf", symbol),
-		fmt.Sprintf("analyzer:lastAnalyzedBar:%s:1h", symbol),
-		fmt.Sprintf("signalEvidence:%s:1h", symbol),
-		fmt.Sprintf("signalEvidence:market-cipher-reversal:%s:1h", symbol),
 		fmt.Sprintf("derivatives:snapshot:latest:binance:future:%s", symbol),
 		fmt.Sprintf("last_trade:binance:future:%s", symbol),
 	}
@@ -185,50 +181,6 @@ func TestOrphanSweep_NActiveAndMOrphansLeavesExactlyN(t *testing.T) {
 	}
 	if mortas := survivorsOf(f, orfas); len(mortas) != 0 {
 		t.Fatalf("%d orphan key(s) survived, wanted 0: %v", len(mortas), mortas[:1])
-	}
-}
-
-// TestOrphanSweep_TheIndicatorFamilyIsSwept: 95.8 of the orphan cohort's 97.3 MiB sit in
-// `indicators`, and `DerivativesKeyPatterns()` did not sweep it.
-//
-// KILLS the sweep that earns the guard but not the coverage — the one that would leave 98% of the
-// reclaimable space standing while the report says "clean".
-func TestOrphanSweep_TheIndicatorFamilyIsSwept(t *testing.T) {
-	t.Parallel()
-
-	ativas := symbolsNamed("ACT", 10)
-	orfas := symbolsNamed("ORF", 4)
-	f := seedFleet(100, ativas, orfas)
-
-	p := &Pruner{redis: f, floor: &fakeAnchorFloor{value: 10, known: true}, gatesApproved: allowAllGates}
-	if err := p.PruneRedis(context.Background(), ativas); err != nil {
-		t.Fatalf("PruneRedis: %v", err)
-	}
-
-	for _, familia := range []string{"indicators:", "analyzer:lastAnalyzedBar:", "signalEvidence:"} {
-		var orfasVivas []string
-		for k := range f.keys {
-			if !strings.HasPrefix(k, familia) {
-				continue
-			}
-			for _, orfa := range orfas {
-				if strings.Contains(k, orfa) {
-					orfasVivas = append(orfasVivas, k)
-				}
-			}
-		}
-		if len(orfasVivas) != 0 {
-			t.Errorf("family %s kept %d orphan key(s): %v", familia, len(orfasVivas), orfasVivas)
-		}
-		var ativasVivas int
-		for k := range f.keys {
-			if strings.HasPrefix(k, familia) {
-				ativasVivas++
-			}
-		}
-		if ativasVivas == 0 {
-			t.Errorf("family %s was left empty — the active keys went with it", familia)
-		}
 	}
 }
 
@@ -452,30 +404,25 @@ func TestOrphanSweep_StopsAtThePassCap(t *testing.T) {
 }
 
 // TestExtractSymbolFromKey_TheAnalyzerFamilies pins the positional parse of the three families,
-// INCLUDING the forms it must refuse.
-//
-// A wrong symbol here deletes live data, and the two `indicators` variants differ precisely in
-// where the symbol falls: the scoped one puts it at parts[3], the legacy one at parts[1].
-func TestExtractSymbolFromKey_TheAnalyzerFamilies(t *testing.T) {
+// INCLUDING the forms it must refuse. Foreign application families are refused here:
+// the standalone pruner does not delete keys it does not own.
+func TestExtractSymbolFromKey_OnlyGoWhaleFamilies(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		nome string
+		name string
 		key  string
 		want string
 	}{
-		{"scoped indicator", "indicators:binance:future:BTC/USDT:1h:wt1", "BTC/USDT"},
-		{"legacy indicator", "indicators:BTC/USDT:1h:wt1", "BTC/USDT"},
-		{"indicator with unknown part count", "indicators:binance:future:BTC/USDT:1h", ""},
-		{"lastAnalyzedBar", "analyzer:lastAnalyzedBar:BTC/USDT:1h", "BTC/USDT"},
-		{"another analyzer key", "analyzer:somethingElse:BTC/USDT:1h", ""},
-		{"signalEvidence from the default producer", "signalEvidence:BTC/USDT:1h", "BTC/USDT"},
-		{"signalEvidence with a producer", "signalEvidence:market-cipher-reversal:BTC/USDT:1h", "BTC/USDT"},
-		{"signalEvidence with unknown part count", "signalEvidence:a:b:c:d", ""},
+		{"last trade", "last_trade:binance:future:BTC/USDT", "BTC/USDT"},
+		{"scoped indicator is foreign", "indicators:binance:future:BTC/USDT:1h:wt1", ""},
+		{"legacy indicator is foreign", "indicators:BTC/USDT:1h:wt1", ""},
+		{"lastAnalyzedBar is foreign", "analyzer:lastAnalyzedBar:BTC/USDT:1h", ""},
+		{"signalEvidence is foreign", "signalEvidence:market-cipher-reversal:BTC/USDT:1h", ""},
 		{"candle is NOT swept", "candles:binance:future:BTC/USDT:1d", ""},
 	} {
 		tc := tc
-		t.Run(tc.nome, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := extractSymbolFromKey(tc.key); got != tc.want {
 				t.Fatalf("extractSymbolFromKey(%q) = %q, wanted %q", tc.key, got, tc.want)

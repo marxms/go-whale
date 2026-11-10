@@ -2,6 +2,7 @@ package derivatives
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -46,7 +47,7 @@ func NewDerivativesWindowReader(hot DerivativesHotReader, cold ColdReader) *Deri
 }
 
 // ErrDerivativesWindowUnservable says the requested window cannot be served in full.
-var ErrDerivativesWindowUnservable = fmt.Errorf("derivatives: window beyond the ZSET horizon and without a durable tier")
+var ErrDerivativesWindowUnservable = errors.New("derivatives: window beyond the ZSET horizon and without a durable tier")
 
 // Series returns every bucket in [from, to], ascending, without duplicates.
 func (r *DerivativesWindowReader) Series(ctx context.Context, scope DerivativesScope, from, to time.Time) ([]*DerivativesSnapshot, error) {
@@ -80,7 +81,7 @@ func (r *DerivativesWindowReader) Series(ctx context.Context, scope DerivativesS
 	// which the hot tier has the point but not the value.
 	coldTo := to
 	if r.cold == nil {
-		return nil, fmt.Errorf("%w: %s desde %s", ErrDerivativesWindowUnservable, scope.Timeframe, from.UTC())
+		return nil, fmt.Errorf("%w: %s since %s", ErrDerivativesWindowUnservable, scope.Timeframe, from.UTC())
 	}
 
 	coldFrom := from

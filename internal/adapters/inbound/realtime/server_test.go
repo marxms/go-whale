@@ -17,7 +17,7 @@ const allowedOrigin = "https://app.test"
 func newTestServer(t *testing.T) (*Server, *Hub, string) {
 	t.Helper()
 	h := startHub(t, newFakeOpens())
-	s := NewServer(h, testSecret(), []string{allowedOrigin}, 30*time.Second, func() int64 { return 1000 }, false)
+	s := NewServer(h, testSecret(), testSecret(), []string{allowedOrigin}, 30*time.Second, func() int64 { return 1000 }, false)
 	ts := httptest.NewServer(http.HandlerFunc(s.ServeWS))
 	t.Cleanup(ts.Close)
 	return s, h, "ws" + strings.TrimPrefix(ts.URL, "http")
@@ -28,10 +28,39 @@ func newTestServer(t *testing.T) (*Server, *Hub, string) {
 func newAuthDisabledServer(t *testing.T) (*Server, *Hub, string) {
 	t.Helper()
 	h := startHub(t, newFakeOpens())
-	s := NewServer(h, nil, nil, 30*time.Second, func() int64 { return 1000 }, true)
+	s := NewServer(h, nil, nil, nil, 30*time.Second, func() int64 { return 1000 }, true)
 	ts := httptest.NewServer(http.HandlerFunc(s.ServeWS))
 	t.Cleanup(ts.Close)
 	return s, h, "ws" + strings.TrimPrefix(ts.URL, "http")
+}
+
+func TestMintTicketRequiresGatewayToken(t *testing.T) {
+	s, h, _ := newTestServer(t)
+	defer stopHub(t, h)
+
+	cases := []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{name: "missing token", want: http.StatusUnauthorized},
+		{name: "wrong token", header: "wrong", want: http.StatusUnauthorized},
+		{name: "correct token", header: string(testSecret()), want: http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/ws-ticket", nil)
+			if tc.header != "" {
+				req.Header.Set("X-Gowhale-Mint-Token", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			s.MintTicket(rec, req)
+			require.Equal(t, tc.want, rec.Code)
+			if tc.want == http.StatusOK {
+				require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+			}
+		})
+	}
 }
 
 func TestServeWSRejectsBadOrigin(t *testing.T) {
@@ -110,8 +139,10 @@ func TestMintTicketReturnsValidTicket(t *testing.T) {
 	s, h, _ := newTestServer(t)
 	defer stopHub(t, h)
 
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ws-ticket", nil)
+	req.Header.Set("X-Gowhale-Mint-Token", string(testSecret()))
 	rec := httptest.NewRecorder()
-	s.MintTicket(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/ws-ticket", nil))
+	s.MintTicket(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body struct {

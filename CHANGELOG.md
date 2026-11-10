@@ -8,17 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Planned
 
-- Recovery over explicit windows: every missing bucket is written and the series
-  head advances.
-- Seed normalization at the write gate, with the BCHUSDT 1w regression as the
-  proof.
-- Capability contract exercised for every declared scope.
-- Certification of the first additional venue (Bybit and/or OKX).
+- Certification of the first additional venue (Bybit first, then OKX).
 
 ## [0.1.0] - 2026-11-09
 
 The first public tree. The code was extracted from a private monorepo and is
-published as the standalone module `github.com/marxms/go-whale`.
+prepared for publication as the standalone module `github.com/marxms/go-whale`.
 
 ### Added
 
@@ -31,10 +26,14 @@ published as the standalone module `github.com/marxms/go-whale`.
 - Trade aggregation into configurable timeframes, deterministic open/close
   election by trade id, and taker buy/sell attribution.
 - Gap detection, historical seeding and closed-bucket repair.
+- Recovery over explicit windows, seed normalization at the write gate and boot gap
+  marking across every configured timeframe, each covered by a regression test.
+- Venue contract harness exercising the four scopes and every declared driver
+  absence.
 - Funding, open interest, open-interest history and long/short ratio where the
   venue declares them.
 - Redis hot tier and optional QuestDB cold tier behind ports.
-- HTTP read API, ticket-authenticated WebSocket feed, Prometheus metrics,
+- HTTP read API, opt-in ticket-authenticated WebSocket feed, Prometheus metrics,
   `/health`, `/ready` and `/openapi.json`.
 - Strict configuration loader with `GOWHALE_*` environment overrides.
 - `gowhale serve`, `gowhale doctor` and `gowhale version`.

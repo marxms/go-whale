@@ -117,7 +117,7 @@ func TestTradeHandler_OutOfOrderBatchesLoseNothing(t *testing.T) {
 		makeSeqTrades(151, 200),
 		makeSeqTrades(101, 150),
 	} {
-		if err := h.HandleTradesWithContext("binance", "future", "BTC/USDT", batch); err != nil {
+		if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "BTC/USDT", batch); err != nil {
 			t.Fatalf("handle: %v", err)
 		}
 	}
@@ -139,7 +139,7 @@ func TestTradeHandler_ReplayIsStillRejected(t *testing.T) {
 
 	batch := makeSeqTrades(1, 50)
 	for i := 0; i < 2; i++ {
-		if err := h.HandleTradesWithContext("binance", "future", "BTC/USDT", batch); err != nil {
+		if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "BTC/USDT", batch); err != nil {
 			t.Fatalf("pass %d: %v", i, err)
 		}
 	}

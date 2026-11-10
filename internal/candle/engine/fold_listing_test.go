@@ -24,17 +24,15 @@ func TestFoldPreservesListingParentWhenListingIsUnproven(t *testing.T) {
 	const ex, mt, sym = "binance", "future", "NEWLISTING/USDT"
 	ce := NewCandleEngine(map[string]int{"default": 800})
 
-	weekOpen := candle.BucketTimestamp(time.Now().UnixMilli(), "1w")
+	// A fixed past week keeps this case independent of the calendar: 2026-01-05 is
+	// a Monday at 00:00 UTC.
+	const weekOpen = int64(1767571200000)
 	const day = int64(86_400_000)
 
 	// Simulated listing three days into the week. The engine has not received
 	// independent proof of that date, so it cannot assume the earlier days absent.
 	listed := weekOpen + 3*day
-	if listed > time.Now().UnixMilli() {
-		t.Skip("today is too early in the week for this scenario")
-	}
-
-	for ts := listed; ts <= time.Now().UnixMilli(); ts += day {
+	for ts := listed; ts < weekOpen+7*day; ts += day {
 		ce.UpdateCandle(ex, mt, sym, "1d", candle.Candle{
 			Timestamp: candle.BucketTimestamp(ts, "1d"),
 			Open:      10, High: 12, Low: 9, Close: 11,

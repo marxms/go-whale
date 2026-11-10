@@ -1,6 +1,7 @@
 <p align="center">
   <img src="docs/assets/brand/gowhale-hero.webp" alt="GoWhale mascot riding a whale through market data" width="720">
 </p>
+<p align="center"><em>Illustrative artwork. Supported venues are listed below; Backpack and Hyperliquid are planned, not supported.</em></p>
 
 # GoWhale
 
@@ -40,17 +41,20 @@ Redis hot tier with an optional QuestDB cold tier.
   open/close election by trade id and explicit taker buy/sell attribution.
 - **Repairs** gaps through venue REST APIs, seeds history, and keeps the live
   measurement when a closed bucket is recovered.
-- **Serves** a small, consumer-driven HTTP surface and a ticket-authenticated
-  WebSocket feed backed by Redis Pub/Sub.
+- **Serves** a small, consumer-driven HTTP surface and an opt-in WebSocket feed fed
+  by the in-process fan-out; a separate Redis Pub/Sub producer carries candle events
+  to external consumers.
 - **Persists** candles and derivatives snapshots to Redis; QuestDB is an optional
   cold tier behind ports.
 
 ## Status
 
 GoWhale is **pre-1.0**. The API and configuration may change between minor
-versions. The code is derived from a deployment that has run against production
-Binance data; this public repository is new, and its GitHub Actions have not yet
-executed on the public remote. The local gate is `make verify`.
+versions. The Binance futures ingestion path has been exercised in a private
+deployment; this repository is prepared for its first public release, its GitHub
+Actions have not yet executed, and publication is pending owner authorization. The
+public gate, the contract harness and the BCHUSDT 1w fixture are the reproducible
+evidence. The local gate is `make verify`.
 
 The reference scope is `binance:future`. Other scopes are supported only where
 the capability matrix says so; see below.
@@ -73,9 +77,9 @@ does not publish the data or this service does not transport it; the adapter
 returns a typed absence instead of inventing a value. The full connection policy
 and the porting checklist are in [`docs/adapters.md`](docs/adapters.md).
 
-Planned venues — Bybit, OKX, Coinbase, Kraken, Bitget, Gate.io, Hyperliquid and
-Backpack — are **not supported yet**. Their priorities and certification criteria
-are in the [roadmap](ROADMAP.md).
+Planned venues — Bybit, OKX, Coinbase, Kraken, Bitget, Gate.io, Hyperliquid,
+Backpack and Deribit — are **not supported yet**. Their priorities and
+certification criteria are in the [roadmap](ROADMAP.md).
 
 ## Quick start
 
@@ -90,10 +94,10 @@ curl -sS http://127.0.0.1:3000/health
 ```
 
 The process answers `/health` as soon as it is up. The JSON body distinguishes
-`starting`, `healthy` and `unhealthy`; `503` means the process is up but at least one
-declared scope is unhealthy (for example, a venue is unreachable from your network).
-The configuration is mounted read-only from `config.example.yaml`; the image never
-contains a private configuration. Stop with:
+`starting`, `healthy`, `degraded` and `unhealthy`; `503` means the process is up but
+at least one declared scope is unhealthy (for example, a venue is unreachable from
+your network). The configuration is mounted read-only from `config.example.yaml`;
+the image never contains a private configuration. Stop with:
 
 ```bash
 docker compose -f compose.example.yaml down -v
@@ -101,10 +105,19 @@ docker compose -f compose.example.yaml down -v
 
 `down -v` deletes the example Redis volume; it is safe only for a throwaway stack.
 
+Once discovery/seed has populated the fleet, the core read path is:
+
+```bash
+curl -sS 'http://127.0.0.1:3000/api/timeseries?symbol=BTC%2FUSDT&timeframe=5m&limit=2'
+```
+
+The first calls may return an empty series until the symbol is discovered, seeded
+and has a closed bucket.
+
 ### From source
 
-Requirements: Go 1.26.10 (the `toolchain` directive lets Go download it) and
-Redis 8.x.
+Requirements: Go 1.26.10 (the pinned toolchain; `GOTOOLCHAIN=auto` downloads it if
+needed) and Redis 8.x.
 
 ```bash
 cp config.example.yaml config.yaml
@@ -121,7 +134,9 @@ make build
 
 `gowhale serve` is the default mode. `gowhale doctor` diagnoses the boot
 preconditions without opening a port; it is intentionally strict and exits `3`
-when an input was not measured.
+when an input was not measured. The example Compose uses `noeviction` with resident
+families that have no TTL, so `doctor` refuses that example by default (exit `1`);
+pass `-immortal-families ''` to diagnose the example's other gates.
 
 ## Configuration
 
@@ -129,7 +144,9 @@ Configuration is one YAML file plus `GOWHALE_*` environment overrides. The loade
 is strict: unknown YAML fields and invalid timeframes or market types are errors,
 and an explicitly selected file is never silently replaced by environment values.
 
-Credentials are environment-only:
+The published examples keep credentials in the environment; the loader also accepts
+`redis.password` and `questdb.pg_password` in YAML, and an environment variable wins
+when both are set. The examples use:
 
 ```bash
 export GOWHALE_CONFIG_FILE=./config.yaml
@@ -145,19 +162,22 @@ See [`docs/configuration.md`](docs/configuration.md) for the full catalogue and
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | process and timeframe checksum |
-| `GET` | `/ready` | dependencies and expected scopes |
+| `GET` | `/health` | process status and timeframe checksum |
+| `GET` | `/ready` | whether at least one venue stream is connected |
 | `GET` | `/metrics` | Prometheus registry |
 | `GET` | `/openapi.json` | generated route contract |
-| `GET` | `/api/subscriptions` | current subscriptions and connection health |
+| `GET` | `/api/subscriptions` | active symbols grouped by exchange/market, timeframes and optional margin rates |
 | `GET` | `/api/timeseries` | candle series for one symbol and timeframe |
 | `GET` | `/api/batch/prices` | latest prices for a symbol set |
 | `GET` | `/api/batch/derivatives-series` | derivatives series for a symbol set |
-| `GET` | `/api/ws-ticket` | short-lived ticket for the WebSocket |
-| `GET` | `/api/ws` | ticket-authenticated WebSocket feed |
+| `GET` | `/api/ws-ticket` | short-lived ticket (opt-in; requires both WS secrets and the gateway header) |
+| `GET` | `/api/ws` | opt-in WebSocket feed, mounted with the ticket endpoint |
 
-The OpenAPI document served at `/openapi.json` is the route contract; it is not
-duplicated in prose.
+The WebSocket edge is opt-in: empty `GOWHALE_REALTIME_WS_TICKET_SECRET` and
+`GOWHALE_REALTIME_WS_MINT_TOKEN` disable it. The authenticating gateway must inject
+`X-Gowhale-Mint-Token` on `/api/ws-ticket`; the server never treats the mint endpoint
+as a user-auth boundary. The OpenAPI document at `/openapi.json` lists the routes;
+query parameters and examples are in [`docs/api.md`](docs/api.md).
 
 ## How it works
 
@@ -206,8 +226,9 @@ docs/                     architecture, adapters, operations, schemas and decisi
 
 ## Operations
 
-- `GET /health` and `GET /ready` distinguish absent coverage, stale data and a
-  healthy component. A component that is not mounted is never reported healthy.
+- `GET /health` distinguishes absent coverage, stale data, degraded and healthy;
+  a component that is not mounted is never reported healthy. `GET /ready` reports
+  whether at least one venue stream is connected.
 - `GET /metrics` exposes the Prometheus registry.
 - `gowhale doctor` reads the compose policy, the configuration and the measured
   boot facts. It exits `0` (approved), `1` (fatal), `2` (unreadable declaration) or
@@ -274,9 +295,12 @@ asks for exchange credentials, API keys or production database access in a repor
 ## License and brand
 
 The source code and documentation are MIT; see [`LICENSE`](LICENSE). The GoWhale
-name and the artwork are project marks and are not licensed by MIT. The exchange
-names and logos in the hero are illustrative and belong to their owners; GoWhale
-is not affiliated with or endorsed by any venue.
+name and the original elements of the artwork are project marks and are not
+licensed by MIT. The artwork also contains the Go logo, a trademark of Google LLC,
+and a gopher derivative created by Renee French and licensed under CC BY 4.0.
+GoWhale is an independent project and is not affiliated with or endorsed by Google
+or the Go project. The exchange names and logos are illustrative and belong to
+their owners; GoWhale is not affiliated with or endorsed by any venue.
 
 See [`docs/branding.md`](docs/branding.md).
 

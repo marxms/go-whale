@@ -38,9 +38,12 @@ type Config struct {
 	RealtimeChannelPrefix string
 	// Realtime chart WebSocket edge.
 	RealtimeWSTicketSecret   string   // HMAC key for connection tickets; empty disables the WS edge
+	RealtimeWSMintToken      string   // server-to-gateway secret required by the ticket-mint endpoint
 	RealtimeWSAllowedOrigins []string // exact browser origins allowed (CSWSH defense)
 	RealtimeWSTicketTTLS     int      // ticket lifetime, seconds
 	RealtimeWSMaxConnAgeS    int      // bounded connection lifetime, seconds (0 = unbounded)
+	RealtimeWSMaxConnections int      // global connection cap; 0 means the default
+	RealtimeWSMaxScopes      int      // per-connection subscription cap; 0 means the default
 	// LOCAL/INTRANET escape hatch (GOWHALE_REALTIME_WS_AUTH_DISABLED). Default FALSE = fail-closed
 	// (ticket + origin required). When EXPLICITLY true (dev-only compose override), the WS edge
 	// mounts without a secret, skips ticket validation, and accepts any Origin — network trust
@@ -114,7 +117,7 @@ func loadFromEnv() Config {
 		pgPassword = &password
 	}
 	return Config{
-		Port:                  getEnv("GOWHALE_SERVER_PORT", "3001"),
+		Port:                  getEnv("GOWHALE_SERVER_PORT", "3000"),
 		RedisAddr:             getRedisAddr("localhost", "6379"),
 		RedisPassword:         getEnv("GOWHALE_REDIS_PASSWORD", ""),
 		RedisDB:               getEnvInt("GOWHALE_REDIS_DB", 0),
@@ -198,9 +201,12 @@ func loadYAML(filename string) (Config, error) {
 func applyRealtimeEnv(cfg *Config) {
 	cfg.RealtimeChannelPrefix = getEnv("GOWHALE_REALTIME_CHANNEL_PREFIX", "gowhale:realtime")
 	cfg.RealtimeWSTicketSecret = getEnv("GOWHALE_REALTIME_WS_TICKET_SECRET", "")
+	cfg.RealtimeWSMintToken = getEnv("GOWHALE_REALTIME_WS_MINT_TOKEN", "")
 	cfg.RealtimeWSAllowedOrigins = getEnvCSV("GOWHALE_REALTIME_WS_ALLOWED_ORIGINS")
 	cfg.RealtimeWSTicketTTLS = getEnvInt("GOWHALE_REALTIME_WS_TICKET_TTL_S", 30)
 	cfg.RealtimeWSMaxConnAgeS = getEnvInt("GOWHALE_REALTIME_WS_MAX_CONN_AGE_S", 3600)
+	cfg.RealtimeWSMaxConnections = getEnvInt("GOWHALE_REALTIME_WS_MAX_CONNECTIONS", 4096)
+	cfg.RealtimeWSMaxScopes = getEnvInt("GOWHALE_REALTIME_WS_MAX_SCOPES_PER_CONNECTION", 128)
 	cfg.RealtimeWSAuthDisabled = getEnvBool("GOWHALE_REALTIME_WS_AUTH_DISABLED", false)
 }
 
@@ -330,7 +336,13 @@ func (c Config) GetExchangeLimits(exchangeID, marketType string) (int, int) {
 // place where those fallbacks live.
 func applyDefaults(cfg *Config) {
 	if cfg.Port == "" {
-		cfg.Port = "3001"
+		cfg.Port = "3000"
+	}
+	if cfg.RealtimeWSMaxConnections <= 0 {
+		cfg.RealtimeWSMaxConnections = 4096
+	}
+	if cfg.RealtimeWSMaxScopes <= 0 {
+		cfg.RealtimeWSMaxScopes = 128
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
@@ -449,6 +461,21 @@ func Validate(cfg Config) error {
 	if cfg.LogFormat != "" && cfg.LogFormat != "text" && cfg.LogFormat != "json" {
 		return fmt.Errorf("server.log_format must be text or json, got %q", cfg.LogFormat)
 	}
+	if !cfg.RealtimeWSAuthDisabled {
+		ticketSet := cfg.RealtimeWSTicketSecret != ""
+		mintSet := cfg.RealtimeWSMintToken != ""
+		if ticketSet || mintSet {
+			if !ticketSet || !mintSet {
+				return fmt.Errorf("the WebSocket edge requires BOTH GOWHALE_REALTIME_WS_TICKET_SECRET and GOWHALE_REALTIME_WS_MINT_TOKEN; set GOWHALE_REALTIME_WS_AUTH_DISABLED=true only for local use")
+			}
+			if err := validateWSSecret("GOWHALE_REALTIME_WS_TICKET_SECRET", cfg.RealtimeWSTicketSecret); err != nil {
+				return err
+			}
+			if err := validateWSSecret("GOWHALE_REALTIME_WS_MINT_TOKEN", cfg.RealtimeWSMintToken); err != nil {
+				return err
+			}
+		}
+	}
 	if cfg.MaxSymbolsPerInstance < 0 {
 		return fmt.Errorf("max_symbols_per_instance must be >= 0")
 	}
@@ -495,5 +522,22 @@ func Validate(cfg Config) error {
 		log.Printf("WARN: high trade buffer memory usage estimated: %d slots (~%d MB) (trade_buffer_size=%d * max_symbols=%d)", tradeBufferUsage, memMB, cfg.TradeBufferSize, cfg.MaxSymbolsPerInstance)
 	}
 
+	return nil
+}
+
+// validateWSSecret rejects short and obviously copied secrets. The edge is
+// server-to-gateway for the mint token and HMAC for the ticket; both need real
+// entropy, and a placeholder published in the repository is not a secret.
+func validateWSSecret(name, value string) error {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) < 32 {
+		return fmt.Errorf("%s must be at least 32 bytes", name)
+	}
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{"replace-with-", "change-me", "changeme", "noauth", "example"} {
+		if strings.HasPrefix(lower, prefix) {
+			return fmt.Errorf("%s must not be a placeholder", name)
+		}
+	}
 	return nil
 }

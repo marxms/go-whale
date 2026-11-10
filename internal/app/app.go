@@ -152,6 +152,7 @@ type App struct {
 	streamCtx         context.Context
 	streamCancel      context.CancelFunc
 	discoveryWg       sync.WaitGroup
+	backgroundWg      sync.WaitGroup
 	tfReg             *candle.TimeframeRegistry
 
 	// continuity detects a missing open-time bucket in the close stream without depending

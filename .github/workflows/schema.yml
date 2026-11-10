@@ -19,7 +19,7 @@ jobs:
 
     services:
       questdb:
-        image: questdb/questdb:8.2.3
+        image: questdb/questdb:8.2.3@sha256:1e109276b61087010d8a3a0b033c313fcb26f6af898cbdc30f53e51cf494d0c5
         ports:
           # 9000 is HTTP/ILP; 8812 is pgwire for the live schema cases.
           - 9000:9000
@@ -28,6 +28,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # No health-cmd: the image has no curl; readiness is measured from the runner.
       - name: Wait for QuestDB

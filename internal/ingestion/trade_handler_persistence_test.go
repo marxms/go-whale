@@ -37,7 +37,7 @@ func TestProcessCandleTrades_ReturnsCriticalErrorOnBatchPersistenceFailure(t *te
 
 	before := handler.PersistenceObservability().Stats()
 
-	err := handler.processCandleTrades(
+	err := handler.processCandleTrades(context.Background(),
 		"binance",
 		"future",
 		"BTC/USDT",
@@ -75,7 +75,7 @@ func TestProcessCandleTrades_LastTradeFailureIsObservedButNotFatal(t *testing.T)
 
 	before := handler.PersistenceObservability().Stats()
 
-	err := handler.processCandleTrades(
+	err := handler.processCandleTrades(context.Background(),
 		"binance",
 		"future",
 		"ETH/USDT",

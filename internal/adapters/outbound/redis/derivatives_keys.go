@@ -138,16 +138,6 @@ func CoinalyzeSeriesKeyPattern() string {
 	return derivCoinalyzeSeriesPrefix + ":*:*:*:*"
 }
 
-// IsCoinalyzeSeriesKey is the membership test the GLOB DOES NOT PROVIDE.
-//
-// Redis `*` spans `:`, so `derivatives:coinalyze:series:*:*:*:*` matches any key with at
-// least that prefix and four colons after it — including a shape nobody foresaw. Before
-// deleting, membership is checked by LITERAL PREFIX, which is the only thing the glob
-// guarantees and the only thing that needs to be guaranteed.
-func IsCoinalyzeSeriesKey(key string) bool {
-	return strings.HasPrefix(key, derivCoinalyzeSeriesPrefix+":")
-}
-
 // DerivativesKeyPatterns returns the globs covering every derivatives key family,
 // for sweeps that walk the whole keyspace without knowing the exchange or market
 // type — today that is the pruner.

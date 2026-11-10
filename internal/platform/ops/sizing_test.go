@@ -74,7 +74,7 @@ func buildCandleSheet(t *testing.T, c *redis.Client, scope, timeframe string, ca
 		RedisCapByTimeframe: map[string]int{timeframe: int(capMembers)},
 	}
 	return BuildSheetFrom(ctx, SheetInput{
-		Service:        ServiceStreamer,
+		Service:        ServiceGoWhale,
 		Client:         c,
 		UniverseCount:  universe,
 		UniverseSource: source,
@@ -163,7 +163,7 @@ func TestSizingSheet_LinesCarryOriginAndDerivation(t *testing.T) {
 }
 
 func TestSizingSheet_UndeclaredTargetIsSaidOutLoud(t *testing.T) {
-	sheet := Sheet{Service: "streamer", WarnRatio: 0}
+	sheet := Sheet{Service: ServiceGoWhale, WarnRatio: 0}
 	body := strings.Join(sheet.Lines(), "\n")
 	if !strings.Contains(body, "TARGET not declared (retention.budget_warn_ratio missing)") {
 		t.Fatalf("the sheet invented a target instead of declaring the absence:\n%s", body)
@@ -206,13 +206,13 @@ func TestSizingSheet_PublishesItsLineAndAggregatesTheOtherService(t *testing.T) 
 	c := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = c.Close() })
 
-	streamer := Sheet{Service: "streamer", PublishedAtMs: 1_000_000, Universe: 500, UniverseSource: "SCARD active_symbols:binance:future", TotalMiB: 1230.5}
+	streamer := Sheet{Service: ServiceGoWhale, PublishedAtMs: 1_000_000, Universe: 500, UniverseSource: "SCARD active_symbols:binance:future", TotalMiB: 1230.5}
 	if err := PublishSheet(ctx, c, streamer); err != nil {
 		t.Fatalf("PublishSheet: %v", err)
 	}
-	analyzer := Sheet{Service: "analyzer", PublishedAtMs: 700_000, Universe: 500, TotalMiB: 739.8}
-	if err := PublishSheet(ctx, c, analyzer); err != nil {
-		t.Fatalf("PublishSheet(analyzer): %v", err)
+	external := Sheet{Service: "external", PublishedAtMs: 700_000, Universe: 500, TotalMiB: 739.8}
+	if err := PublishSheet(ctx, c, external); err != nil {
+		t.Fatalf("PublishSheet(external): %v", err)
 	}
 
 	total, parts, err := AggregateMiB(ctx, c, 1_000_000)
@@ -223,11 +223,11 @@ func TestSizingSheet_PublishesItsLineAndAggregatesTheOtherService(t *testing.T) 
 		t.Fatalf("total = %v, want %v", total, 1230.5+739.8)
 	}
 	joined := strings.Join(parts, " · ")
-	if !strings.Contains(joined, "streamer=1230.5 MiB") || !strings.Contains(joined, "analyzer=739.8 MiB") {
+	if !strings.Contains(joined, "gowhale=1230.5 MiB") || !strings.Contains(joined, "external=739.8 MiB") {
 		t.Fatalf("the aggregation does not name the two services: %q", joined)
 	}
-	if !strings.Contains(joined, "analyzer=739.8 MiB (A=500, published 5 min ago)") {
-		t.Fatalf("the age of the analyzer line was not declared: %q", joined)
+	if !strings.Contains(joined, "external=739.8 MiB (A=500, published 5 min ago)") {
+		t.Fatalf("the age of the external line was not declared: %q", joined)
 	}
 }
 
@@ -238,7 +238,7 @@ func TestSizingSheet_RefusesToProjectWithoutAMeasurement(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 
 	sheet := BuildSheetFrom(ctx, SheetInput{
-		Service:       ServiceStreamer,
+		Service:       ServiceGoWhale,
 		Client:        c,
 		UniverseCount: 500,
 		SampleBudget:  CoefficientSample,
@@ -323,7 +323,7 @@ func TestResidentFamilies_TheDeclarationCoversExactlyWhatTheStreamerProjects(t *
 
 	declaredFamilies := make([]string, 0, len(ResidentFamilies()))
 	for _, fam := range ResidentFamilies() {
-		if fam.Owner != ServiceStreamer {
+		if fam.Owner != ServiceGoWhale {
 			continue
 		}
 		if fam.Retention == "" {
@@ -371,7 +371,7 @@ func TestSampleImmortalFamilies_ReadsTheDeclarationInsteadOfASecondLiteral(t *te
 // THE SHEET PUBLISHES THE FUNCTION AND THE THREE INSTANCES, with the formula alongside.
 func TestDerivativesDiskBudget_TheSheetPublishesTheFormulaAndTheThreeInstances(t *testing.T) {
 	window := 2000 * 24 * time.Hour
-	published := DerivativesBudgetLines("streamer", derivDurableTFsForOps(), window)
+	published := DerivativesBudgetLines(ServiceGoWhale, derivDurableTFsForOps(), window)
 	lines := strings.Join(published, "\n")
 
 	for _, needed := range []string{"A=500", "A=600", "A=800"} {
@@ -414,7 +414,7 @@ func derivDurableTFsForOps() []string {
 }
 
 func TestDerivativesDiskBudget_NoCoverageIsSaidOutLoud(t *testing.T) {
-	lines := strings.Join(DerivativesBudgetLines("streamer", nil, 2000*24*time.Hour), "\n")
+	lines := strings.Join(DerivativesBudgetLines(ServiceGoWhale, nil, 2000*24*time.Hour), "\n")
 	if !strings.Contains(lines, "WITHOUT durable coverage") {
 		t.Errorf("empty coverage came out as a normal projection:\n%s", lines)
 	}
@@ -424,7 +424,7 @@ func TestDerivativesDiskBudget_NoCoverageIsSaidOutLoud(t *testing.T) {
 }
 
 func TestDerivativesDiskBudget_NoRetentionWindowIsSaidOutLoud(t *testing.T) {
-	lines := strings.Join(DerivativesBudgetLines("streamer", derivDurableTFsForOps(), 0), "\n")
+	lines := strings.Join(DerivativesBudgetLines(ServiceGoWhale, derivDurableTFsForOps(), 0), "\n")
 	if !strings.Contains(lines, "WITHOUT declared retention") {
 		t.Errorf("missing window came out as a normal projection:\n%s", lines)
 	}
@@ -462,7 +462,7 @@ func TestDurableCoverageLines_AWrittenColumnTheRouteDoesNotAskIsNotCovered(t *te
 		ReadableColumns: []string{"timestamp", "funding_rate"},
 	}
 
-	lines := strings.Join(DurableCoverageLines("streamer", coverage), "\n")
+	lines := strings.Join(DurableCoverageLines(ServiceGoWhale, coverage), "\n")
 
 	if !strings.Contains(lines, "1 of 3 quantities are WRITTEN AND READABLE") {
 		t.Errorf("the count counted the column the read does not ask for as covered:\n%s", lines)
@@ -483,7 +483,7 @@ func TestDurableCoverageLines_AWrittenColumnTheRouteDoesNotAskIsNotCovered(t *te
 
 func TestDurableCoverageLines_TheSheetAgreesWithTheGate(t *testing.T) {
 	coverage := DurableFieldCoverage()
-	lines := strings.Join(DurableCoverageLines("streamer", coverage), "\n")
+	lines := strings.Join(DurableCoverageLines(ServiceGoWhale, coverage), "\n")
 
 	uncoveredByGate := map[string]bool{}
 	for _, finding := range coverage.UncoveredMemberFields("qualquer") {
@@ -505,7 +505,7 @@ func TestDurableCoverageLines_TheSheetAgreesWithTheGate(t *testing.T) {
 }
 
 func TestDurableCoverageLines_TheRealDeclarationIsTwelveOfThirteen(t *testing.T) {
-	lines := strings.Join(DurableCoverageLines("streamer", DurableFieldCoverage()), "\n")
+	lines := strings.Join(DurableCoverageLines(ServiceGoWhale, DurableFieldCoverage()), "\n")
 
 	if !strings.Contains(lines, "12 of 13 quantities are WRITTEN AND READABLE") {
 		t.Errorf("the real shape of the coverage changed and the sheet did not follow:\n%s", lines)
@@ -525,7 +525,7 @@ func TestDurableCoverageLines_TheRealDeclarationIsTwelveOfThirteen(t *testing.T)
 }
 
 func TestSizingSheet_CarriesTheTwoHalvesOfDurableCoverage(t *testing.T) {
-	lines := strings.Join(Sheet{Service: "streamer"}.Lines(), "\n")
+	lines := strings.Join(Sheet{Service: ServiceGoWhale}.Lines(), "\n")
 	if !strings.Contains(lines, "WRITTEN AND READABLE") {
 		t.Errorf("the assembled sheet does not publish the conjunction the gate requires:\n%s", lines)
 	}

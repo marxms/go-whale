@@ -10,6 +10,8 @@ the contract harness certifies it.
 | Status | Meaning |
 | --- | --- |
 | **Shipped** | Present in the current tree and covered by the product gate |
+| **Resolved** | A known problem whose fix is present and covered by a regression test |
+| **Documented** | A known operator condition with a runbook, not a code fix |
 | **Next** | Agreed and unblocked; the next work to be scheduled |
 | **Later** | Agreed, but depends on a prerequisite or on demand |
 | **Blocked** | Needs an external proof, an owner decision or access we do not have |
@@ -35,7 +37,7 @@ Priority is about correctness and user impact, not about how easy the work is.
 
 ## Current state
 
-Shipped in the first public release:
+Prepared for the first public release (publication pending owner authorization):
 
 - Standalone Go module `github.com/marxms/go-whale`, MIT, no CCXT and no GPL-3.0
   dependency.
@@ -66,27 +68,26 @@ the public record; an item leaves it only when its exit criterion is met.
 
 | ID | Problem | Status | Why it matters | Exit criterion |
 | --- | --- | --- | --- | --- |
-| P1 | CCXT pulled `go-ethereum` (GPL-3.0) into an MIT binary | **Shipped** | The license inventory could not describe the binary as MIT-only | Removed; `go list -m all` contains no CCXT or `go-ethereum` (ADR 0006) |
+| P1 | CCXT pulled `go-ethereum` (GPL-3.0) into an MIT binary | **Resolved** | The license inventory could not describe the binary as MIT-only | Removed; `go list -m all` contains no CCXT or `go-ethereum` (ADR 0006) |
 | P2 | Boot migration remains in the tree | **Blocked** | Removing it before proving `SoleCopyKeysAtRisk == 0` against production can destroy the only copy of a candle | A production measurement recorded with the `doctor` command, then an owner decision to remove the migration |
 | P3 | CI workflows have never executed on GitHub | **Next** | Local `actionlint` is not a substitute for a real runner | The first push runs `ci`, `integration`, `schema` and `security`; failures are fixed at the cause |
 | P4 | The public repository was never published | **Blocked** | The code existed only as an internal module | The launch commits exist in a local repository; publication requires an owner-authorized push |
 | P5 | LAN derivatives data was not audited at the destination | **Blocked** | Local proof does not prove the deployed data | A read-only audit of the destination, with freshness, parity and absence recorded |
 | P6 | Ten benchmarks are inconclusive (CV > 10%) | **Later** | A number outside the protocol cannot become a PASS by repetition | Re-run with the same protocol and publish PASS, inconclusive or accepted-with-ADR per case |
-| P7 | Comment debt outside the Go module | **Not planned here** | The monorepo's TypeScript/React corpus is not part of this repository | Tracked in the monorepo, not in this roadmap |
-| P8 | Stale CCXT references in docs | **Shipped** | Documentation that names a removed adapter sends contributors to a dead end | Zero current-support CCXT references; the historical ADR stays marked as history |
-| M1 | Recovery can no-op on an explicit window | **Next** | A backstop job with `window.start > 0` can refetch only the straddling bucket, so the series freezes behind a stale head while the process still reports healthy | Every missing bucket in `[window.start, now]` is written; the head advances; a no-progress breaker suspends and records the scope |
-| M2 | Seed writes do not normalize impossible OHLC | **Next** | A venue can publish a weekly candle with `high < open`; an impossible candle must not enter Redis or the engine | Every seeded candle passes the write gate; the real BCHUSDT 1w line from 2020-01-13 is a regression fixture |
-| M3 | The driver capability contract is not exercised for every scope | **Shipped** | A matrix row without a harness is a declaration, not a certification | The four scopes pass `TestVenueContractFourScopes` for every driver capability; every absent driver capability returns its typed error and records the metric |
-| M13 | Boot marking covers only the kline feed interval | **Next** | Coarser buckets stay unmarked and their repair is vetoed, so the series can freeze while the process is healthy | Every configured timeframe of the open bucket is marked; a coarser bucket's repair is proven not to be vetoed |
-| M4 | The testnet was reachable as a configuration default | **Shipped** | Testnet prices are production-like but not production data | Production hosts are the default; `.env.example` no longer advertises the testnet; a test asserts the policy |
+| P7 | Comment debt outside the Go module | **Not planned here** | The TypeScript/React corpus is a separate codebase, not this repository | Out of scope; tracked by the owner outside this repository |
+| P8 | Stale CCXT references in docs | **Resolved** | Documentation that names a removed adapter sends contributors to a dead end | Zero current-support CCXT references; the historical ADR stays marked as history |
+| M1 | Recovery can no-op on an explicit window | **Resolved** | A backstop job with `window.start > 0` can refetch only the straddling bucket, so the series freezes behind a stale head while the process still reports healthy | Every missing bucket in `[window.start, now]` is written; the head advances; a no-progress breaker suspends and records the scope |
+| M2 | Seed writes do not normalize impossible OHLC | **Resolved** | A venue can publish a weekly candle with `high < open`; an impossible candle must not enter Redis or the engine | Every seeded candle passes the write gate; the real BCHUSDT 1w line from 2020-01-13 is a regression fixture |
+| M3 | The driver capability contract is not exercised for every scope | **Resolved** | A matrix row without a harness is a declaration, not a certification | The four scopes pass `TestVenueContractFourScopes` for every driver capability; every absent driver capability returns its typed error and records the metric |
+| M13 | Boot marking covers only the kline feed interval | **Resolved** | Coarser buckets stay unmarked and their repair is vetoed, so the series can freeze while the process is healthy | Every configured timeframe of the open bucket is marked; a coarser bucket's repair is proven not to be vetoed |
+| M4 | The testnet was reachable as a configuration default | **Resolved** | Testnet prices are production-like but not production data | Production hosts are the default; `.env.example` no longer advertises the testnet; a test asserts the policy |
 | M5 | Only `binance:future` has a transportable kline feed | **Later** | The other scopes need trade aggregation and REST candles; the matrix declares the absence | A venue publishes a kline stream this service can transport, or the scope stays declared absent |
 | M6 | Interior gaps behind the head are not located | **Later** | The recovery window derives from the head; a hole in the middle needs a coverage index | A coverage index answers "which buckets exist" without scanning the whole series |
 | M7 | Historical open-interest backfill is absent | **Later** | Current OI and OI history are not the same product | A per-venue historical source, its budget and its absence semantics are designed |
 | M8 | The REST budget and the pacer are split | **Later** | Two budget mechanisms are two ways to be wrong about the same limit | One process-wide budget owns every venue read, with the same classification |
-| M9 | The dynamic `SUBSCRIBE` path without a combined URL is unvalidated | **Later** | Turning off the combined URL without a probe can silently drop streams | A dedicated probe proves the path before the combined URL is disabled |
 | M10 | A reused Redis volume can refuse boot under `noeviction` | **Documented** | Resident families without TTL can hit the ceiling after a restart | The operator runbook and the Compose warning; the startup gate stays fatal by design |
-| M11 | The binary had no public version surface | **Shipped** | A user could not identify the build in a report | `gowhale version` prints version, commit and build date; `go version -m` shows the module |
-| M12 | Dead code and task narrative remained | **Shipped** | A public tree should not carry abandoned paths or phase labels | `go tool deadcode ./cmd/...` is clean or every survivor is justified; no `TASK`/`Fase`/`Trilha` narrative |
+| M11 | The binary had no public version surface | **Resolved** | A user could not identify the build in a report | `gowhale version` prints version, commit and build date; `go version -m` shows the module |
+| M12 | Dead code and task narrative remained | **Resolved** | A public tree should not carry abandoned paths or phase labels | `go tool deadcode ./cmd/...` is clean or every survivor is justified; no `TASK`/`Fase`/`Trilha` narrative |
 
 ## Venue expansion
 
@@ -137,7 +138,7 @@ the same for every venue; the reference implementation is `binance:future`.
    carries the `DocsURL` that sustains it; zero means "not documented".
 3. **Capability matrix.** Add the row in `internal/market/capability.go`. Every
    capability the reference scope has must be present or declared absent with a
-   reason; an absent method returns `ErrCapabilityAbsent` and records the metric.
+   reason; an absent method returns `CapabilityAbsentError` and records the metric.
 4. **Canonical DTOs.** The adapter returns `trade.Trade`, `candle.Candle` and the
    derivatives values. No vendor type crosses the package boundary.
 5. **Integrity.** Normalization and rejection happen once at the write gate
@@ -162,15 +163,14 @@ A scope that fails any item does not ship.
 
 | Item | Status | Next step |
 | --- | --- | --- |
-| Generic recovery over explicit windows (M1) | **Next** | Make a job with `window.start > 0` fetch the whole `[start, now]`; keep the one-bucket shortcut only for a short reconnect without an explicit window. Add a no-progress breaker test. |
-| Seed normalization (M2) | **Next** | Normalize or reject every seeded candle at the write gate; keep the BCHUSDT 1w regression. |
-| Driver capability harness for every scope (M3) | **Shipped** | `TestVenueContractFourScopes` exercises the four scopes and every declared driver absence. |
-| In-flight timeframe marking at boot (M13) | **Next** | Mark every configured timeframe of the open bucket, not only the kline feed interval; prove that a coarser bucket's repair is not vetoed. |
+| Generic recovery over explicit windows (M1) | **Resolved** | Make a job with `window.start > 0` fetch the whole `[start, now]`; keep the one-bucket shortcut only for a short reconnect without an explicit window. Add a no-progress breaker test. |
+| Seed normalization (M2) | **Resolved** | Normalize or reject every seeded candle at the write gate; keep the BCHUSDT 1w regression. |
+| Driver capability harness for every scope (M3) | **Resolved** | `TestVenueContractFourScopes` exercises the four scopes and every declared driver absence. |
+| In-flight timeframe marking at boot (M13) | **Resolved** | Mark every configured timeframe of the open bucket, not only the kline feed interval; prove that a coarser bucket's repair is not vetoed. |
 | Interior gap coverage (M6) | **Later** | Design a coverage index keyed by symbol and timeframe; do not scan the whole series per cycle. |
 | Historical OI backfill (M7) | **Later** | Pick the first venue with a documented historical endpoint; design its budget and absence semantics. |
 | Kline feeds beyond the reference scope (M5) | **Later** | Transport a venue kline stream only where it exists; otherwise keep the declared absence. |
 | REST budget consolidation (M8) | **Later** | Move the pacer behind the same process-wide budget, with one classification table. |
-| Dynamic `SUBSCRIBE` probe (M9) | **Later** | Prove the path end to end before disabling the combined URL. |
 
 ## Reliability and operations
 
@@ -199,25 +199,24 @@ A scope that fails any item does not ship.
 Milestones are exit criteria, not dates. A milestone can slip; a criterion cannot
 be weakened to make it pass.
 
-### v0.1.0 — first public release (current)
+### v0.1.0 — first public tree (publication pending)
 
 - [x] Standalone MIT module, no CCXT/GPL.
 - [x] Binance futures reference scope; Binance spot and BingX spot/swap declared.
 - [x] Capability matrix and connection policy documented.
 - [x] Venue contract harness exercises the four scopes and every declared driver absence.
+- [x] Recovery over explicit windows, seed normalization and boot gap marking covered by regression tests.
 - [x] `serve`, `doctor` and `version`.
 - [x] `make verify` green in the new repository.
 - [x] Brand assets, README, roadmap, community files and local CI validation.
 - [ ] Four independent reviews and an independent verifier.
 - [ ] Publication, after the reviews and the owner's explicit authorization.
 
-### v0.2.0 — recovery correctness and the first new venue
+### v0.2.0 — the first new venue and the first public CI run
 
-- [ ] M1: explicit-window recovery writes every missing bucket and advances the head.
-- [ ] M2: seed normalization at the write gate with the BCHUSDT 1w regression.
-- [ ] Bybit and/or OKX passes the full certification checklist.
+- [ ] Bybit (the first P0 target) passes the full certification checklist.
 - [ ] GitHub Actions runs the same gates locally validated at launch.
-- [ ] `make verify` green with the new scope and the recovery tests.
+- [ ] `make verify` green with the new scope.
 
 ### v0.3.0 — spot coverage and release engineering
 

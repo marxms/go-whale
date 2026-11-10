@@ -41,6 +41,18 @@ is a release blocker. The gate runs `make vuln` (`govulncheck`), and the depende
 inventory is reviewed when a module is added or upgraded. `make verify` also runs
 the module-hygiene checks and the import-boundary check.
 
+## WebSocket edge
+
+The chart WebSocket edge is opt-in. It mounts only when both
+`GOWHALE_REALTIME_WS_TICKET_SECRET` and `GOWHALE_REALTIME_WS_MINT_TOKEN` are set to
+at least 32 random bytes. The authenticating gateway must verify the user and inject
+`X-Gowhale-Mint-Token` on `/api/ws-ticket`; the mint endpoint is not a user-auth
+boundary by itself, so do not expose it directly to the internet. The server sets
+`Cache-Control: no-store` on tickets, validates scopes against the capability
+matrix, and caps connections and per-connection subscriptions. Ticket secrets and
+mint tokens are environment-only in the published examples and must never be
+committed.
+
 ## Operational hardening
 
 - Run the binary as a non-root user; the example image uses an unprivileged user.

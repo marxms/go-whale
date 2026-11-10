@@ -38,8 +38,8 @@ const notAvailable = "n/d"
 // somewhere.
 const KeyPrefix = "sizing:v1:"
 
-// ServiceStreamer names this service's line.
-const ServiceStreamer = "streamer"
+// ServiceGoWhale names this service's line.
+const ServiceGoWhale = "gowhale"
 
 // CandleCapConfigKey names the key that RETAINS the candles family.
 const CandleCapConfigKey = "candle_engine.redis_cap_by_timeframe"
@@ -539,20 +539,14 @@ func ResidentFamilies() []ResidentFamily {
 		{
 			Name:       "candles",
 			PatternFor: func(scope string) string { return "candles:" + scope + ":*" },
-			Owner:      "streamer",
+			Owner:      ServiceGoWhale,
 			Retention:  "ZSET cap per timeframe (candle_engine.redis_cap_by_timeframe), WITHOUT TTL — the absence is a declared decision",
 		},
 		{
 			Name:       "derivatives:series",
 			PatternFor: func(scope string) string { return "derivatives:series:" + scope + ":*" },
-			Owner:      "streamer",
+			Owner:      ServiceGoWhale,
 			Retention:  "ZSET cap per timeframe (derivatives.series_cap_by_timeframe), raised to the baseline floor, WITHOUT TTL",
-		},
-		{
-			Name:       "indicators",
-			PatternFor: func(string) string { return "indicators:*" },
-			Owner:      "analyzer",
-			Retention:  "MAX_INDICATOR_VALUES cap, imposed by whoever writes the family; the analyzer's sheet is what projects it",
 		},
 	}
 }

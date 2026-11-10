@@ -38,8 +38,9 @@ stream:
   trade_buffer_size: 5000
 
 exchanges:
-  # Binance Futures — 500 assets via discovery
-  # 500 streams fit in 1 connection (Binance limit: 1024 streams/conn)
+  # Binance Futures — discovery is capped at 50 assets; max_symbols is the
+  # capacity ceiling. Each symbol is one stream, and 500 streams fit in one
+  # connection (Binance limit: 1024 streams/conn).
   #
   - id: binance
     enabled: true
@@ -127,7 +128,7 @@ retention:
   measured_startup_warn_ratio: 0.90  # MEASURED occupancy at startup that warns loudly
   budget_sample_interval_seconds: 60  # cadence of the continuous observer (not a retention)
   # Ceiling of the Redis container — the occupancy that kills the process.
-  # The streamer runs in a different container and does not read the Docker
+  # GoWhale runs in a different container and does not read the Docker
   # socket; declare the ceiling here so the occupancy alarm compares against
   # the same number the container enforces.
   redis_container_memory_limit_mib: 4096

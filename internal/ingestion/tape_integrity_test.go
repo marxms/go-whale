@@ -93,7 +93,7 @@ func TestTape_UnderCountedBucketMarksItselfForRepair(t *testing.T) {
 	base := time.UnixMilli(1_785_728_700_000) // 03:45:00 UTC, the incident bucket
 
 	ids := withoutID(contiguousIDs(767575152, 767575200), 767575180)
-	if err := h.HandleTradesWithContext("binance", "future", "XRP/USDT", tapeAt(base, ids...)); err != nil {
+	if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "XRP/USDT", tapeAt(base, ids...)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestTape_ReorderingIsNotReportedAsLoss(t *testing.T) {
 		contiguousIDs(900151, 900200),
 		contiguousIDs(900101, 900150),
 	} {
-		if err := h.HandleTradesWithContext("binance", "future", "ADA/USDT", tapeAt(base, batch...)); err != nil {
+		if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "ADA/USDT", tapeAt(base, batch...)); err != nil {
 			t.Fatalf("handle: %v", err)
 		}
 	}
@@ -160,7 +160,7 @@ func TestTape_NonContiguousVenueIsNeverJudged(t *testing.T) {
 	base := time.UnixMilli(1_785_728_700_000)
 
 	// Sparse by nature, not by loss.
-	if err := h.HandleTradesWithContext("bingx", "future", "BTC/USDT",
+	if err := h.HandleTradesWithContext(context.Background(), "bingx", "future", "BTC/USDT",
 		tapeAt(base, 100, 250, 900, 1500, 4000, 9000)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}

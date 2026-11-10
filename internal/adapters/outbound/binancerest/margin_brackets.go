@@ -92,6 +92,7 @@ type MarginBracketCatalog struct {
 
 	mu    sync.RWMutex
 	rates map[string]float64
+	wg    sync.WaitGroup
 }
 
 // NewMarginBracketCatalog builds a catalog with defaults filled in. It performs no I/O:
@@ -172,7 +173,9 @@ func (c *MarginBracketCatalog) Refresh(ctx context.Context) error {
 // Start runs the reload loop until ctx is done. A failure is logged at error level and the
 // loop continues — the collection cycle never dies because a table could not be read.
 func (c *MarginBracketCatalog) Start(ctx context.Context) {
+	c.wg.Add(1)
 	go func() {
+		defer c.wg.Done()
 		// Load immediately so a restart is not blind for a whole interval.
 		if err := c.Refresh(ctx); err != nil {
 			logger.OrDiscard(c.log).Error("margin-brackets initial load failed; serving last known table",
@@ -196,8 +199,13 @@ func (c *MarginBracketCatalog) Start(ctx context.Context) {
 	}()
 }
 
+// Wait blocks until the reload loop has exited. Call it after canceling the context
+// passed to Start.
+func (c *MarginBracketCatalog) Wait() { c.wg.Wait() }
+
 // fetch performs one unauthenticated GET and maps the body to tier-1 rates. No credential
 // is attached, here or anywhere else in this file.
+
 func (c *MarginBracketCatalog) fetch(ctx context.Context) (map[string]float64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
 	if err != nil {

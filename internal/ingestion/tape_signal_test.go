@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -15,7 +16,7 @@ func TestTape_MissingTradeIsCounted(t *testing.T) {
 
 	before := m.missing[labels("binance", "future")]
 	ids := withoutID(contiguousIDs(500000, 500060), 500030)
-	if err := h.HandleTradesWithContext("binance", "future", "SOL/USDT", tapeAt(base, ids...)); err != nil {
+	if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "SOL/USDT", tapeAt(base, ids...)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if got := m.missing[labels("binance", "future")] - before; got != 1 {
@@ -37,7 +38,7 @@ func TestTape_ReorderingIsNotCounted(t *testing.T) {
 		contiguousIDs(910151, 910200),
 		contiguousIDs(910101, 910150),
 	} {
-		if err := h.HandleTradesWithContext("binance", "future", "DOT/USDT", tapeAt(base, batch...)); err != nil {
+		if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "DOT/USDT", tapeAt(base, batch...)); err != nil {
 			t.Fatalf("handle: %v", err)
 		}
 	}
@@ -54,7 +55,7 @@ func TestTape_NonContiguousVenueIsNeverCounted(t *testing.T) {
 	base := time.UnixMilli(1_785_728_700_000)
 
 	before := m.missing[labels("bingx", "future")]
-	if err := h.HandleTradesWithContext("bingx", "future", "ETH/USDT",
+	if err := h.HandleTradesWithContext(context.Background(), "bingx", "future", "ETH/USDT",
 		tapeAt(base, 100, 250, 900, 1500, 4000, 9000)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}

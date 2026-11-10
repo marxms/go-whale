@@ -114,7 +114,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	composePath := fs.String("compose", "compose.example.yaml",
 		"path to the compose file that declares the memory policy")
-	service := fs.String("service", "redis", "compose service whose `command` declares the policy")
+	service := fs.String("service", "redis", "compose service whose command declares the policy")
 	families := fs.String("immortal-families", strings.Join(defaultImmortalFamilies(), ","),
 		"resident families without TTL, comma-separated")
 	configPath := fs.String("config", "config.yaml",

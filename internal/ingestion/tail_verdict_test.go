@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -156,7 +157,7 @@ func TestTape_LossInTheFINALTradesOfABucketStillMarksIt(t *testing.T) {
 	bucketB := bucketA.Add(time.Minute)
 
 	// Batch 1: a clean run inside A. Establishes the watermark the crossing is measured against.
-	if err := h.HandleTradesWithContext("binance", "future", "XRP/USDT",
+	if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "XRP/USDT",
 		tapeAt(bucketA, contiguousIDs(500_000, 500_030)...)); err != nil {
 		t.Fatalf("batch 1: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestTape_LossInTheFINALTradesOfABucketStillMarksIt(t *testing.T) {
 	tail := withoutID(contiguousIDs(500_031, 500_037), 500_034)
 	batch := tapeAt(bucketA.Add(58*time.Second), tail...)
 	batch = append(batch, tapeAt(bucketB, contiguousIDs(500_038, 500_040)...)...)
-	if err := h.HandleTradesWithContext("binance", "future", "XRP/USDT", batch); err != nil {
+	if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "XRP/USDT", batch); err != nil {
 		t.Fatalf("batch 2: %v", err)
 	}
 
@@ -212,7 +213,7 @@ func TestTape_TailLossIsAttributedSeparately(t *testing.T) {
 	before := m.missingTail[labels(ex, mk)]
 	bucketA := time.UnixMilli(1_785_996_000_000)
 
-	if err := h.HandleTradesWithContext(ex, mk, "XRP/USDT",
+	if err := h.HandleTradesWithContext(context.Background(), ex, mk, "XRP/USDT",
 		tapeAt(bucketA, contiguousIDs(900_000, 900_030)...)); err != nil {
 		t.Fatalf("batch 1: %v", err)
 	}
@@ -223,7 +224,7 @@ func TestTape_TailLossIsAttributedSeparately(t *testing.T) {
 	tail := withoutID(contiguousIDs(900_031, 900_037), 900_034)
 	batch := tapeAt(bucketA.Add(58*time.Second), tail...)
 	batch = append(batch, tapeAt(bucketA.Add(time.Minute), contiguousIDs(900_038, 900_040)...)...)
-	if err := h.HandleTradesWithContext(ex, mk, "XRP/USDT", batch); err != nil {
+	if err := h.HandleTradesWithContext(context.Background(), ex, mk, "XRP/USDT", batch); err != nil {
 		t.Fatalf("batch 2: %v", err)
 	}
 

@@ -5,11 +5,21 @@ import (
 	"testing"
 )
 
+func TestCurrentKeepsLinkedVersion(t *testing.T) {
+	old := Version
+	Version = "0.1.0"
+	defer func() { Version = old }()
+
+	if got := Current().Version; got != "0.1.0" {
+		t.Fatalf("Current().Version = %q, want the linker-stamped 0.1.0", got)
+	}
+}
+
 func TestCurrentCarriesVersionAndCommit(t *testing.T) {
 	info := Current()
 
-	if info.Version == "" {
-		t.Fatal("version is empty")
+	if info.Version != "devel" {
+		t.Fatalf("test build version = %q, want devel without linker flags", info.Version)
 	}
 	if info.Commit == "" {
 		t.Fatal("commit is empty")
