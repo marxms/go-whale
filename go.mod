@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.26.10
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/binance/binance-connector-go/clients/derivativestradingusdsfutures v1.9.0
 	github.com/binance/binance-connector-go/common/v2 v2.2.0
 	github.com/go-chi/chi/v5 v5.3.0
