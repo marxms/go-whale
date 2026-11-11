@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	redisstore "github.com/marxms/go-whale/internal/adapters/outbound/redis"
@@ -36,6 +37,7 @@ type ColdCompletenessMonitor struct {
 	interval time.Duration
 	metrics  Metrics
 	log      *slog.Logger
+	wg       sync.WaitGroup
 }
 
 // SetMetrics injects the observability port. The composition root calls it before Start.
@@ -51,7 +53,9 @@ func NewColdCompletenessMonitor(cold coldGapScanner, lister activeSymbolLister, 
 
 // Start runs the periodic completeness scan in a goroutine until ctx is canceled.
 func (m *ColdCompletenessMonitor) Start(ctx context.Context) {
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
 		// Immediate first scan so the gauges reflect reality without waiting a full
 		// interval — no cold-start blind spot after a restart.
 		if err := m.scanOnce(ctx); err != nil {
@@ -72,9 +76,14 @@ func (m *ColdCompletenessMonitor) Start(ctx context.Context) {
 	}()
 }
 
+// Wait blocks until the scan loop has exited. Call it after canceling the context passed
+// to Start, before the cold store is closed.
+func (m *ColdCompletenessMonitor) Wait() { m.wg.Wait() }
+
 // scanOnce runs one full completeness pass (one aggregated query per scope×timeframe)
 // and updates the gauges. A per-scope error is logged and skipped so one bad scope never
 // aborts the whole scan.
+
 func (m *ColdCompletenessMonitor) scanOnce(ctx context.Context) error {
 	symbols, err := m.lister.GetAllActiveSymbols(ctx)
 	if err != nil {

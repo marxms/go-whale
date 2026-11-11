@@ -209,7 +209,7 @@ func FuzzClientControlFrameKeepsHubHealthy(f *testing.F) {
 
 		// Distinctive enough that fuzzer mutations will not produce it by accident, which is
 		// what lets its presence in the index act as a processing barrier.
-		barrier := Scope{Exchange: "binance", MarketType: "futures", Symbol: "FUZZBARRIER", Timeframe: "4h"}
+		barrier := Scope{Exchange: "binance", MarketType: "future", Symbol: "FUZZ/BARRIER", Timeframe: "4h"}
 		require.True(t, sendCtl(fc, data))
 		require.True(t, sendCtl(fc, subReq(t, "subscribe", barrier)))
 

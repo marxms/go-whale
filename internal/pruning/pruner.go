@@ -238,11 +238,11 @@ func (p *Pruner) PruneRedis(ctx context.Context, activeSymbols []string) error {
 // the broad pattern also reaches the old form someone wrote and nobody remembers. The parse
 // decides, refusing the shape it does not know.
 func orphanSweepPatterns() []string {
+	// Only families this service writes belong here. The analyzer/indicator/signal
+	// families are another application's keys; sweeping them from the standalone
+	// service would delete data it does not own.
 	return []string{
 		"last_trade:*:*:*",
-		"indicators:*",
-		"analyzer:lastAnalyzedBar:*",
-		"signalEvidence:*",
 	}
 }
 
@@ -260,46 +260,17 @@ func orphanSweepPatterns() []string {
 //	derivatives:series:{exchange}:{marketType}:{symbol}:{timeframe}
 //	derivatives:baseline:{exchange}:{marketType}:{symbol}:{timeframe}:{version}
 //	last_trade:{exchange}:{marketType}:{symbol}
-//	indicators:{symbol}:{timeframe}:{name}
-//	indicators:{exchange}:{marketType}:{symbol}:{timeframe}:{name}
-//	analyzer:lastAnalyzedBar:{symbol}:{timeframe}
-//	signalEvidence:{symbol}:{timeframe}
-//	signalEvidence:{producerId}:{symbol}:{timeframe}
 //
-// THE SHAPES OF THE LAST THREE FAMILIES ARE WHAT THE ANALYZER BUILDERS PRODUCE —
-// `apps/analyzer/src/services/state/redis-keys.ts` (`boundedIndicatorKey`, `signalEvidenceKey`)
-// and `services/realtime/analyzed-bar-tracker.ts` (`lastAnalyzedBarKey`). They are distinguished
-// by SEGMENT COUNT, and the count works because a symbol carries `/` and never `:`. Any other
-// count returns "" and the key is SKIPPED: a wrong symbol here deletes live data, and the two
-// `indicators` variants differ precisely in where the symbol falls.
+// Any other count returns "" and the key is SKIPPED: a wrong symbol here deletes
+// live data. Families written by another application are not parsed and are not
+// swept by this service.
 func extractSymbolFromKey(key string) string {
 	if sym := redisstore.SymbolFromDerivativesKey(key); sym != "" {
 		return sym
 	}
 	parts := strings.Split(key, ":")
-	switch parts[0] {
-	case "last_trade":
-		if len(parts) == 4 {
-			return parts[3]
-		}
-	case "indicators":
-		switch len(parts) {
-		case 4: // indicators:{symbol}:{tf}:{name}
-			return parts[1]
-		case 6: // indicators:{exchange}:{marketType}:{symbol}:{tf}:{name}
-			return parts[3]
-		}
-	case "analyzer":
-		if len(parts) == 4 && parts[1] == "lastAnalyzedBar" {
-			return parts[2]
-		}
-	case "signalEvidence":
-		switch len(parts) {
-		case 3: // signalEvidence:{symbol}:{tf}
-			return parts[1]
-		case 4: // signalEvidence:{producerId}:{symbol}:{tf}
-			return parts[2]
-		}
+	if parts[0] == "last_trade" && len(parts) == 4 {
+		return parts[3]
 	}
 	return ""
 }

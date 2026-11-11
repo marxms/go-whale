@@ -2,7 +2,8 @@ package app
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -31,6 +32,7 @@ func (a *App) shutdown(ctx context.Context) error {
 	// Shutdown runs precisely because ctx was canceled, so every drain gets a detached base:
 	// values propagate, cancellation does not, and each phase applies its own deadline.
 	shutdownCtx := context.WithoutCancel(ctx)
+	var errs []error
 
 	// ── 1. INTAKE ────────────────────────────────────────────────────────────────
 	a.traceShutdown("intake")
@@ -39,7 +41,12 @@ func (a *App) shutdown(ctx context.Context) error {
 	if a.streamCancel != nil {
 		a.streamCancel()
 	}
-	a.waitDiscovery(15 * time.Second)
+	if err := a.waitDiscovery(15 * time.Second); err != nil {
+		errs = append(errs, err)
+	}
+	if err := a.waitBackground(15 * time.Second); err != nil {
+		errs = append(errs, err)
+	}
 	a.stopKlineFeed()
 	if a.manager != nil {
 		a.manager.Stop()
@@ -90,11 +97,13 @@ func (a *App) shutdown(ctx context.Context) error {
 	if a.qdbStore != nil {
 		if err := a.qdbStore.Close(); err != nil {
 			a.logger().Warn("questdb store close error", "error", err)
+			errs = append(errs, fmt.Errorf("questdb close: %w", err))
 		}
 	}
 	if a.tieredStore != nil {
 		if err := a.tieredStore.Close(); err != nil {
 			a.logger().Warn("tiered store close error", "error", err)
+			errs = append(errs, fmt.Errorf("tiered store close: %w", err))
 		}
 	} else if a.redisStore != nil {
 		// With the candle engine disabled there is no tiered store to own the shared
@@ -103,6 +112,7 @@ func (a *App) shutdown(ctx context.Context) error {
 		// client, so exactly one of them closes it.
 		if err := a.redisStore.Close(); err != nil {
 			a.logger().Warn("redis store close error", "error", err)
+			errs = append(errs, fmt.Errorf("redis close: %w", err))
 		}
 	}
 
@@ -112,24 +122,26 @@ func (a *App) shutdown(ctx context.Context) error {
 		httpCtx, cancel := context.WithTimeout(shutdownCtx, 10*time.Second)
 		defer cancel()
 		if err := a.httpServer.Shutdown(httpCtx); err != nil {
-			log.Printf("http server shutdown error: %v", err)
+			a.logger().Warn("http server shutdown error", "error", err)
+			errs = append(errs, fmt.Errorf("http shutdown: %w", err))
 		}
 	}
 	if a.pprofServer != nil {
 		pprofCtx, cancel := context.WithTimeout(shutdownCtx, time.Second)
 		defer cancel()
 		if err := a.pprofServer.Shutdown(pprofCtx); err != nil {
-			log.Printf("pprof server shutdown error: %v", err)
+			a.logger().Warn("pprof server shutdown error", "error", err)
+			errs = append(errs, fmt.Errorf("pprof shutdown: %w", err))
 		}
 	}
 
 	a.logger().Info("shutdown complete")
-	return nil
+	return errors.Join(errs...)
 }
 
 // waitDiscovery waits for the background loops tracked by discoveryWg, bounded by
 // timeout. It never blocks shutdown forever on a wedged exchange loop.
-func (a *App) waitDiscovery(timeout time.Duration) {
+func (a *App) waitDiscovery(timeout time.Duration) error {
 	done := make(chan struct{})
 	go func() {
 		a.discoveryWg.Wait()
@@ -138,8 +150,34 @@ func (a *App) waitDiscovery(timeout time.Duration) {
 	select {
 	case <-done:
 		a.logger().Info("all discovery goroutines finished")
+		return nil
 	case <-time.After(timeout):
 		a.logger().Warn("discovery goroutines did not finish within timeout; continuing shutdown", "timeout", timeout)
+		return fmt.Errorf("discovery goroutines did not finish within %s", timeout)
+	}
+}
+
+// waitBackground joins the intake loops that are not part of discoveryWg: the
+// auto-subscribe loop, the goroutine monitor and the two periodic background
+// components. It is bounded so a wedged loop cannot hold the stores open forever.
+func (a *App) waitBackground(timeout time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		a.backgroundWg.Wait()
+		if a.coldCompleteness != nil {
+			a.coldCompleteness.Wait()
+		}
+		if a.marginBrackets != nil {
+			a.marginBrackets.Wait()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		a.logger().Warn("background goroutines did not finish within timeout; continuing shutdown", "timeout", timeout)
+		return fmt.Errorf("background goroutines did not finish within %s", timeout)
 	}
 }
 

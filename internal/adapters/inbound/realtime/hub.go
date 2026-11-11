@@ -14,7 +14,7 @@ const (
 	pongWait  = 60 * time.Second
 	// pingPeriod is 54s, strictly < pongWait. It is ALSO the heartbeat cadence the web
 	// client's silence watchdog is calibrated against: `DEFAULT_SILENCE_TIMEOUT_MS` in
-	// apps/web/src/services/chartStreamClient.ts tolerates 120s without a raw arrival. Raising this
+	// The browser client's silence watchdog tolerates 120s without a raw arrival. Raising this
 	// past half of that threshold makes every healthy wire in a quiet market get torn down every
 	// 120s — the fix becoming the defect. Both relations are asserted by TestPingPeriodCadence
 	// (hub_test.go); retune this and that test tells you which coupling you broke.
@@ -54,6 +54,24 @@ func WithPingPeriod(d time.Duration) HubOption {
 	}
 }
 
+// WithMaxMembers caps the number of registered connections. Non-positive values are ignored.
+func WithMaxMembers(n int) HubOption {
+	return func(h *Hub) {
+		if n > 0 {
+			h.maxMembers = n
+		}
+	}
+}
+
+// WithMaxSubscriptions caps the number of scopes per connection. Non-positive values are ignored.
+func WithMaxSubscriptions(n int) HubOption {
+	return func(h *Hub) {
+		if n > 0 {
+			h.maxSubscriptions = n
+		}
+	}
+}
+
 // OpenCandleSource is the in-process source of the merged open candle.
 type OpenCandleSource = distribution.OpenCandleSource
 
@@ -62,22 +80,28 @@ type OpenCandleSource = distribution.OpenCandleSource
 type Hub struct {
 	*distribution.Hub
 
-	eventsBufSize int
-	connMaxAge    time.Duration
-	pingPeriod    time.Duration
+	eventsBufSize    int
+	connMaxAge       time.Duration
+	pingPeriod       time.Duration
+	maxMembers       int
+	maxSubscriptions int
 }
 
 // NewHub builds a hub. opens supplies the merged open candle (in-process); clock
 // returns ms epoch (time.Now().UnixMilli in production).
 func NewHub(opens OpenCandleSource, clock func() int64, opts ...HubOption) *Hub {
 	h := &Hub{
-		Hub:           distribution.NewHub(opens, clock),
-		eventsBufSize: defaultEventsBuf,
-		pingPeriod:    pingPeriod,
+		eventsBufSize:    defaultEventsBuf,
+		pingPeriod:       pingPeriod,
+		maxMembers:       4096,
+		maxSubscriptions: 128,
 	}
 	for _, o := range opts {
 		o(h)
 	}
+	h.Hub = distribution.NewHub(opens, clock,
+		distribution.WithMaxMembers(h.maxMembers),
+		distribution.WithMaxSubscriptions(h.maxSubscriptions))
 	return h
 }
 

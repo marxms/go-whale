@@ -2,7 +2,8 @@ package app
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
 	"net/http"
 	_ "net/http/pprof" //nolint:gosec // G108: handlers are served only on 127.0.0.1:6060 by startPprofServer.
 	"os"
@@ -62,7 +63,11 @@ func (a *App) Run(ctx context.Context) error {
 
 	a.manager.Start(streamCtx)
 
-	a.startGoroutineMonitor(streamCtx)
+	a.backgroundWg.Add(1)
+	go func() {
+		defer a.backgroundWg.Done()
+		a.startGoroutineMonitor(streamCtx)
+	}()
 
 	// Periodically measure cold DATA completeness (missing buckets per scope).
 	if a.coldCompleteness != nil {
@@ -81,16 +86,21 @@ func (a *App) Run(ctx context.Context) error {
 
 	router := a.newHTTPRouter(a.derivStore, a.derivStore, a.derivStore)
 	a.httpServer = a.newHTTPServer(router)
+	httpErr := make(chan error, 1)
 	go func() {
-		log.Printf("GoWhale listening on :%s", a.cfg.Port)
+		a.logger().Info("GoWhale listening", "address", ":"+a.cfg.Port)
 		if err := a.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			a.logger().Error("http server error", "error", err)
+			httpErr <- err
 		}
 	}()
 
 	a.startPprofServer()
 
-	go a.autoSubscribe(streamCtx)
+	a.backgroundWg.Add(1)
+	go func() {
+		defer a.backgroundWg.Done()
+		a.autoSubscribe(streamCtx)
+	}()
 
 	a.discoveryWg = sync.WaitGroup{}
 	for _, exCfg := range a.cfg.Exchanges {
@@ -154,13 +164,17 @@ func (a *App) Run(ctx context.Context) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(quit)
+	var runErr error
 	select {
 	case <-quit:
 	case <-ctx.Done():
+	case err := <-httpErr:
+		runErr = fmt.Errorf("http server: %w", err)
+		a.logger().Error("http server failed; shutting down", "error", err)
 	}
 
 	a.logger().Info("starting graceful shutdown")
-	return a.Shutdown(ctx)
+	return errors.Join(runErr, a.Shutdown(ctx))
 }
 
 // startPprofServer binds pprof to loopback only: operators reach it via
@@ -184,29 +198,27 @@ func (a *App) startPprofServer() {
 // startGoroutineMonitor logs goroutine count and manager stats every 15s.
 // It exits when ctx is canceled.
 func (a *App) startGoroutineMonitor(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 
-		var lastCount int
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				numGoroutines := runtime.NumGoroutine()
+	var lastCount int
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			numGoroutines := runtime.NumGoroutine()
 
-				if lastCount > 0 && numGoroutines > lastCount*2 && numGoroutines > 200 {
-					a.logger().Warn("goroutine leak detected",
-						"previous", lastCount, "current", numGoroutines)
-				}
-
-				a.logger().Info("goroutine monitor",
-					"goroutines", numGoroutines, "hybrid_manager", a.manager.GetStats())
-				lastCount = numGoroutines
+			if lastCount > 0 && numGoroutines > lastCount*2 && numGoroutines > 200 {
+				a.logger().Warn("goroutine leak detected",
+					"previous", lastCount, "current", numGoroutines)
 			}
+
+			a.logger().Info("goroutine monitor",
+				"goroutines", numGoroutines, "hybrid_manager", a.manager.GetStats())
+			lastCount = numGoroutines
 		}
-	}()
+	}
 }
 
 // newDerivPoller builds a derivatives poller bound to the PROCESS-lifetime funding

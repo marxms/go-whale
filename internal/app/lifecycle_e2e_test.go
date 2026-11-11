@@ -104,6 +104,28 @@ func freeTCPPort(t *testing.T) string {
 	return strconv.Itoa(port)
 }
 
+func TestRunFailsWhenHTTPPortIsOccupied(t *testing.T) {
+	var listenCfg net.ListenConfig
+	ln, err := listenCfg.Listen(t.Context(), "tcp", ":0")
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	defer func() { _ = ln.Close() }()
+
+	cfg, _ := lifecycleConfig(t, func(c *config.Config) { c.Port = port })
+	app := newLifecycleApp(t, cfg)
+	app.marginBrackets = nil // the real catalog would call Binance; this case is not about it
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := app.Run(ctx); err == nil {
+		t.Fatal("Run returned nil with the HTTP port occupied; a process serving no API must not exit 0")
+	} else if !strings.Contains(err.Error(), "http server") {
+		t.Fatalf("Run error = %v, want it to name the HTTP server failure", err)
+	}
+}
+
 // lifecycleHTTPClient disables keep-alives: the default transport's idle connections
 // keep a read goroutine alive past the test, which is a test artifact and not an app
 // leak.
@@ -154,7 +176,7 @@ func waitForHTTPStatus(t *testing.T, client *http.Client, url string, want int) 
 type lifecycleNoopHandler struct{}
 
 func (lifecycleNoopHandler) HandleTrades(string, any) error { return nil }
-func (lifecycleNoopHandler) HandleTradesWithContext(string, string, string, any) error {
+func (lifecycleNoopHandler) HandleTradesWithContext(context.Context, string, string, string, any) error {
 	return nil
 }
 

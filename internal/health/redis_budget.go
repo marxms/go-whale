@@ -138,7 +138,7 @@ func (s RedisBudgetSignal) String() string {
 	line := fmt.Sprintf("[REDIS-BUDGET] %s · maxmemory=%.1f%% · container=%.1f%% · keys without TTL=%d",
 		state, s.MaxMemoryOccupancy*100, s.ContainerOccupancy*100, s.KeysWithoutTTL)
 	if s.EvictedDeltaKnown {
-		line += fmt.Sprintf(" · evicted_keys +%d desde a amostra anterior", s.EvictedDelta)
+		line += fmt.Sprintf(" · evicted_keys +%d since a amostra anterior", s.EvictedDelta)
 	}
 	if len(s.Reasons) > 0 {
 		line += " · " + strings.Join(s.Reasons, " · ")

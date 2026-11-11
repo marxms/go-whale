@@ -46,7 +46,7 @@ func TestOwnershipGate_GateSilencesOnlyFullOwnership(t *testing.T) {
 
 	// scope A: nothing owned -> counted
 	hA, mA := handlerWithMetrics(&capturingStore{}, "vA", "future", tfs)
-	if err := hA.HandleTradesWithContext("vA", "future", "ETH/USDT", b5trade("1", 1_700_000_100_000, 7)); err != nil {
+	if err := hA.HandleTradesWithContext(context.Background(), "vA", "future", "ETH/USDT", b5trade("1", 1_700_000_100_000, 7)); err != nil {
 		t.Fatal(err)
 	}
 	if got := mA.admitted[labels("vA", "future")]; got != 7 {
@@ -58,7 +58,7 @@ func TestOwnershipGate_GateSilencesOnlyFullOwnership(t *testing.T) {
 	for _, tf := range tfs {
 		hB.MarkVenueOwnedCandles("vB", "future", tf)
 	}
-	if err := hB.HandleTradesWithContext("vB", "future", "ETH/USDT", b5trade("1", 1_700_000_100_000, 7)); err != nil {
+	if err := hB.HandleTradesWithContext(context.Background(), "vB", "future", "ETH/USDT", b5trade("1", 1_700_000_100_000, 7)); err != nil {
 		t.Fatal(err)
 	}
 	if got := mB.admitted[labels("vB", "future")]; got != 0 {
@@ -69,7 +69,7 @@ func TestOwnershipGate_GateSilencesOnlyFullOwnership(t *testing.T) {
 	// applied{5m} is now 0 for this scope while admitted keeps climbing.
 	hC, mC := handlerWithMetrics(&capturingStore{}, "vC", "future", tfs)
 	hC.MarkVenueOwnedCandles("vC", "future", "5m")
-	if err := hC.HandleTradesWithContext("vC", "future", "ETH/USDT", b5trade("1", 1_700_000_100_000, 7)); err != nil {
+	if err := hC.HandleTradesWithContext(context.Background(), "vC", "future", "ETH/USDT", b5trade("1", 1_700_000_100_000, 7)); err != nil {
 		t.Fatal(err)
 	}
 	got := mC.admitted[labels("vC", "future")]
@@ -120,7 +120,7 @@ func TestOwnershipGate_NoDeadlockUnderConcurrentOwnershipDeclaration(t *testing.
 			defer wg.Done()
 			for i := range 500 {
 				id := fmt.Sprintf("%d-%d", w, i)
-				_ = h.HandleTradesWithContext("vRace", "future", "ETH/USDT",
+				_ = h.HandleTradesWithContext(context.Background(), "vRace", "future", "ETH/USDT",
 					b5trade(id, 1_700_000_100_000+int64(i)*1000, 1))
 				h.PurgeSymbol("vRace:future:ETH/USDT")
 			}

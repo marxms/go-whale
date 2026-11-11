@@ -121,14 +121,15 @@ func NewRouterWithMetricsAndLogger(
 		log:               logger.OrDiscard(log),
 	}
 
-	// the chart WebSocket path chart WebSocket edge (ticket-authenticated; Origin-checked). Mounted at
-	// the top level so no body/timeout middleware interferes with the upgrade.
+	// Chart WebSocket edge (short-lived ticket; Origin-checked). Mounted at the top
+	// level so no body/timeout middleware interferes with the upgrade; the mint
+	// endpoint requires the gateway's X-Gowhale-Mint-Token.
 	if wsServer != nil {
 		r.Get("/api/ws", wsServer.ServeWS)
 		r.Get("/api/ws-ticket", wsServer.MintTicket)
 	}
 
-	// Auth handled by nginx gateway — user ID in X-Auth-User-Id header
+	// Public read-only market-data routes.
 	r.Group(func(r chi.Router) {
 		r.Get("/api/timeseries", handler.GetTimeseriesQuery)
 		r.Get("/api/subscriptions", handler.GetSubscriptions)

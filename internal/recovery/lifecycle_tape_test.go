@@ -536,7 +536,7 @@ func (r *tapeRig) stream(segs ...*tapeSegment) {
 			})
 		}
 	}
-	if err := r.handler.HandleTradesWithContext(tapeExchangeID, tapeMarketType, tapeSymbol, batch); err != nil {
+	if err := r.handler.HandleTradesWithContext(context.Background(), tapeExchangeID, tapeMarketType, tapeSymbol, batch); err != nil {
 		r.t.Fatalf("HandleTradesWithContext: %v", err)
 	}
 }

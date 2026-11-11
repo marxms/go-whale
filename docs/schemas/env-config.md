@@ -42,7 +42,7 @@ top-level sections and no others.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `port` | string | `"3001"` | HTTP port |
+| `port` | string | `"3000"` | HTTP port |
 | `log_level` | string | `"info"` | `debug`, `info`, `warn` or `error` |
 | `log_format` | string | `"text"` | `text` or `json` |
 
@@ -113,7 +113,7 @@ baseline floor by the store.
 | `redis_cap_by_timeframe` | map | empty | resident candle ZSET cap per timeframe |
 
 The resident cap resolution order is documented in
-[redis.md](redis.md#candlesexchange-marketsymbol-timeframe).
+[redis.md](redis.md#candlesexchangemarkettypesymboltimeframe).
 
 ### `questdb`
 
@@ -195,14 +195,20 @@ environment surface.
 | Variable | Applies | Meaning |
 | --- | --- | --- |
 | `GOWHALE_REALTIME_CHANNEL_PREFIX` | both paths | Pub/Sub prefix, default `gowhale:realtime` |
-| `GOWHALE_REALTIME_WS_TICKET_SECRET` | both paths | HMAC secret for WS tickets; empty disables the authenticated edge unless auth is explicitly disabled |
+| `GOWHALE_REALTIME_WS_TICKET_SECRET` | both paths | HMAC secret for WS tickets; both WS secrets are required, empty disables the edge unless auth is explicitly disabled |
+| `GOWHALE_REALTIME_WS_MINT_TOKEN` | both paths | server-to-gateway secret for `/api/ws-ticket`; the gateway injects `X-Gowhale-Mint-Token` |
 | `GOWHALE_REALTIME_WS_TICKET_TTL_S` | both paths | ticket lifetime, seconds, default `30` |
 | `GOWHALE_REALTIME_WS_ALLOWED_ORIGINS` | both paths | comma-separated exact origins |
 | `GOWHALE_REALTIME_WS_MAX_CONN_AGE_S` | both paths | maximum session age, seconds, default `3600` |
+| `GOWHALE_REALTIME_WS_MAX_CONNECTIONS` | both paths | global connection cap, default `4096` |
+| `GOWHALE_REALTIME_WS_MAX_SCOPES_PER_CONNECTION` | both paths | per-connection subscription cap, default `128` |
 | `GOWHALE_REALTIME_WS_AUTH_DISABLED` | both paths | explicit local-only auth disable, default `false` |
 
-`GOWHALE_REALTIME_WS_AUTH_DISABLED=true` is a development/LAN escape hatch: the
-WebSocket edge mounts without a secret, skips ticket validation and accepts any
+`GOWHALE_REALTIME_WS_TICKET_SECRET` and `GOWHALE_REALTIME_WS_MINT_TOKEN` must each
+be at least 32 random bytes; placeholders are rejected at boot. The mint endpoint is
+not a user-auth boundary: the proxy must authenticate the user and inject the mint
+token. `GOWHALE_REALTIME_WS_AUTH_DISABLED=true` is a development/LAN escape hatch:
+the WebSocket edge mounts without a secret, skips ticket validation and accepts any
 origin. It is never derived from an empty secret.
 
 ### Coinalyze

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -251,7 +252,10 @@ func subscribe(t *testing.T, fc *fakeConn, scope Scope) {
 }
 
 func testScope(sym string) Scope {
-	return Scope{Exchange: "binance", MarketType: "futures", Symbol: sym, Timeframe: "4h"}
+	if !strings.Contains(sym, "/") {
+		sym += "/USDT"
+	}
+	return Scope{Exchange: "binance", MarketType: "future", Symbol: sym, Timeframe: "4h"}
 }
 
 func closedCandle(ts int64, closePrice float64) candle.Candle {
@@ -427,7 +431,7 @@ func TestSingleWriterInvariant(t *testing.T) {
 // ---- heartbeat cadence ---------------------------------------------
 
 // clientSilenceTimeoutMirror mirrors `DEFAULT_SILENCE_TIMEOUT_MS` from
-// `apps/web/src/services/chartStreamClient.ts` (120 s). Go does not read the TypeScript
+// the browser client's silence watchdog (120 s). Go does not read the TypeScript
 // constant, so the coupling is mirrored here and named on both sides: `hub.go` points to the
 // client watchdog in the `pingPeriod` declaration, and the client watchdog points back to
 // `pingPeriod`. If one of the two clocks changes without the other, this test lights up.

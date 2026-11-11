@@ -81,17 +81,19 @@ func (a *App) buildStorage(cfg config.Config, tfReg *candle.TimeframeRegistry, m
 		store.Catalog = a.tieredStore
 		store.SeedWriter = a.tieredStore
 
-		// Chart WebSocket edge. Built when a ticket secret is configured OR the
-		// explicit local escape hatch is set. Neither => WS edge disabled (fail-closed, no
-		// idle goroutines).
-		if cfg.RealtimeWSTicketSecret != "" || cfg.RealtimeWSAuthDisabled {
+		// Chart WebSocket edge. Built when BOTH the ticket secret and the gateway mint
+		// token are configured, OR the explicit local escape hatch is set. Otherwise the
+		// edge stays disabled (fail-closed, no idle goroutines).
+		if (cfg.RealtimeWSTicketSecret != "" && cfg.RealtimeWSMintToken != "") || cfg.RealtimeWSAuthDisabled {
 			if cfg.RealtimeWSAuthDisabled {
 				a.logger().Warn("GOWHALE_REALTIME_WS_AUTH_DISABLED=true; the WS chart edge is open to any origin")
 			}
 			nowMs := func() int64 { return time.Now().UnixMilli() }
 			a.hub = realtime.NewHub(a.candleEngine, nowMs,
-				realtime.WithConnMaxAge(time.Duration(cfg.RealtimeWSMaxConnAgeS)*time.Second))
-			a.wsServer = realtime.NewServer(a.hub, []byte(cfg.RealtimeWSTicketSecret),
+				realtime.WithConnMaxAge(time.Duration(cfg.RealtimeWSMaxConnAgeS)*time.Second),
+				realtime.WithMaxMembers(cfg.RealtimeWSMaxConnections),
+				realtime.WithMaxSubscriptions(cfg.RealtimeWSMaxScopes))
+			a.wsServer = realtime.NewServer(a.hub, []byte(cfg.RealtimeWSTicketSecret), []byte(cfg.RealtimeWSMintToken),
 				cfg.RealtimeWSAllowedOrigins, time.Duration(cfg.RealtimeWSTicketTTLS)*time.Second, nowMs, cfg.RealtimeWSAuthDisabled)
 		}
 

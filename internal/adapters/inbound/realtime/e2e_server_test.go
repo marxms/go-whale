@@ -242,7 +242,7 @@ func newE2EHarness(cfg e2eHarnessConfig) (*e2eHarness, error) {
 	opens := newE2EOpenSource()
 	hub := NewHub(opens, func() int64 { return time.Now().UnixMilli() })
 	// authDisabled=false on purpose: the gate must exercise the REAL ticket + Origin path.
-	edge := NewServer(hub, cfg.secret, cfg.origins, e2eTicketTTL, func() int64 { return time.Now().UnixMilli() }, false)
+	edge := NewServer(hub, cfg.secret, cfg.secret, cfg.origins, e2eTicketTTL, func() int64 { return time.Now().UnixMilli() }, false)
 
 	h := &e2eHarness{
 		hub:      hub,

@@ -7,14 +7,14 @@ import (
 )
 
 func TestNewEnvelopeSetsSchemaVersion(t *testing.T) {
-	e := NewEnvelope(EventCandleClose, Scope{Symbol: "BTCUSDT"}, candle.Candle{}, 1, 123)
+	e := NewEnvelope(EventCandleClose, Scope{Symbol: "BTC/USDT"}, candle.Candle{}, 1, 123)
 	if e.Version != SchemaVersion {
 		t.Fatalf("Version = %d, want %d", e.Version, SchemaVersion)
 	}
 }
 
 func TestEnvelopeRoundTrip(t *testing.T) {
-	scope := Scope{Exchange: "binance", MarketType: "futures", Symbol: "BTCUSDT", Timeframe: "4h"}
+	scope := Scope{Exchange: "binance", MarketType: "future", Symbol: "BTC/USDT", Timeframe: "4h"}
 	candle := candle.Candle{Timestamp: 2000, Open: 1, High: 2, Low: 0.5, Close: 1.5, Volume: 10}
 	want := NewEnvelope(EventCandleClose, scope, candle, 42, 1_710_000_000_000)
 

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [developer, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (Go 1.26.10)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26.10"
+          cache-dependency-path: go.sum
+
+      - name: Toolchain and pinned tools
+        run: make tools-check
+
+      - name: Format
+        run: make fmt-check
+
+      - name: Vet
+        run: make vet
+
+      - name: Lint
+        run: make lint
+
+      - name: Import boundaries
+        run: make boundaries
+
+      - name: Workflow lint
+        run: make workflow-lint
+
+      # Module hygiene: `go mod verify` and `go mod tidy -diff`.
+      - name: Module hygiene
+        run: |
+          set -euo pipefail
+          make mod-verify
+          make tidy-check
+
+      - name: Vulnerabilities
+        run: make vuln
+
+      # Three shuffled runs with -race and -count=1: one run measures an order, not
+      # stability. The expected count comes from `go test -list` and the executed count
+      # is checked, so a suite that runs nothing cannot pass.
+      - name: Test and race (3 shuffled orders, no cache)
+        run: |
+          set -euo pipefail
+
+          declared="$(go test -list '.*' ./... | grep -cE '^(Test|Fuzz)' || true)"
+          if [ "${declared:-0}" -eq 0 ]; then
+            echo "no Test/Fuzz case listed by 'go test -list' in ./... — the suite is gone or -list measured nothing" >&2
+            exit 1
+          fi
+          echo "cases declared by -list: ${declared}"
+
+          for run in 1 2 3; do
+            output="$(mktemp)"
+            echo "::group::suite · run ${run} of 3 · shuffled order"
+            go test -race -shuffle=on -count=1 -v ./... 2>&1 | tee "${output}"
+            echo "::endgroup::"
+
+            executed="$(grep -cE '^--- (PASS|SKIP|FAIL): ' "${output}" || true)"
+            echo "run ${run} of 3: ${executed} of ${declared} cases executed"
+            if [ "${executed:-0}" -lt "${declared}" ]; then
+              echo "REFUSED: ${executed} case(s) executed against ${declared} declared by -list." >&2
+              echo "The suite exited 0 without running what it claims. This is the disarm that changes no flag — one extra argument on the command line is enough — so the step measures the RESULT, not only the command shape." >&2
+              exit 1
+            fi
+          done
+
+      - name: Build
+        run: make build
+
+      # Compile integration-tagged tests; live-venue cases run in the integration workflow.
+      - name: Compile integration-tagged tests
+        run: make integration-compile
+
+      - name: Compose contract
+        run: docker compose -f compose.example.yaml config >/dev/null

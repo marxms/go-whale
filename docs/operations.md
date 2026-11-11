@@ -8,8 +8,16 @@ declaration is unreadable.
 
 ```bash
 gowhale doctor -compose compose.example.yaml -service redis \
-  -config config.yaml -indicator-cap 400 -sole-copy-keys-at-risk 0
+  -config config.yaml -immortal-families '' -indicator-cap 512 -sole-copy-keys-at-risk 0
 ```
+
+The example Compose deliberately uses `noeviction` while the service has resident
+families without TTL. Run `doctor` against that example **without**
+`-immortal-families ''` and it refuses with exit `1`
+(`eviction-policy-vs-immortal-families`). That refusal is the gate working, not a
+broken probe: the example is a throwaway stack, and a production deployment must
+choose an eviction policy and prove the sole-copy risk. The empty value above
+diagnoses the other gates without pretending the example is a deployment.
 
 ## Boot migration (sole-copy)
 
@@ -35,10 +43,10 @@ substitute for the production measurement.
 
 | Endpoint | Meaning |
 | --- | --- |
-| `/health` | process and timeframe checksum |
-| `/ready` | dependencies and expected scopes |
+| `/health` | process status, timeframe checksum and per-component state (`starting`, `healthy`, `degraded`, `unhealthy`) |
+| `/ready` | whether at least one venue stream is connected |
 | `/metrics` | Prometheus registry |
-| `/openapi.json` | generated route contract |
+| `/openapi.json` | generated route contract; query parameters are in [`api.md`](api.md) |
 
 Health distinguishes absent coverage, stale data and a healthy component. A
 component that is not mounted is never reported healthy.
@@ -56,6 +64,43 @@ still apply, and `/api/subscriptions` lists them.
 SIGTERM cancels the root context. The process stops ingestion, drains bounded
 queues, flushes snapshots, closes transports and then the Redis client. Close
 is idempotent; a second signal is not required.
+
+## WebSocket edge
+
+The WS edge is opt-in. It mounts only when both
+`GOWHALE_REALTIME_WS_TICKET_SECRET` and `GOWHALE_REALTIME_WS_MINT_TOKEN` are set
+to at least 32 random bytes, and `GOWHALE_REALTIME_WS_ALLOWED_ORIGINS` lists the
+browser origins. The authenticating gateway must verify the user and inject
+`X-Gowhale-Mint-Token` on `/api/ws-ticket`; the mint endpoint is not a user-auth
+boundary by itself. Tickets are short-lived and the response carries
+`Cache-Control: no-store`. Connections and subscriptions are capped by
+`GOWHALE_REALTIME_WS_MAX_CONNECTIONS` and
+`GOWHALE_REALTIME_WS_MAX_SCOPES_PER_CONNECTION`; scopes are validated against the
+capability matrix. The WS feed itself is the in-process distribution hub; Redis
+Pub/Sub is a separate producer for external consumers. The example Compose does not
+set the secrets, so its WS routes are absent by design.
+
+## `noeviction` boot refusal
+
+The service has resident families without TTL (`candles`, `derivatives:series`).
+Under `noeviction`, Redis fails writes once memory is full instead of evicting a
+candle that may be the only copy; the startup gate therefore refuses to boot when
+the declared policy cannot keep those families. The example Compose uses
+`noeviction` on a throwaway volume, so `doctor` refuses it by default. To diagnose a
+deployment, declare the real policy and the live resident families:
+
+1. Read the destination policy from the Compose service `command`.
+2. Measure the live families and the sole-copy risk before changing the policy.
+3. Run `doctor` with `-sole-copy-keys-at-risk <measured>`; never presume zero.
+4. Use `-immortal-families ''` only for the disposable example, never as a way to
+   silence a production refusal.
+
+## Redis ownership and pruning
+
+The pruner only unlinks families this service owns: candles, last trades and
+derivatives. It never deletes `indicators:*`, `analyzer:*` or `signalEvidence:*`
+keys; those belong to another application. A GoWhale instance pointed at a shared
+Redis must not be given ownership of those families.
 
 ## Docker
 

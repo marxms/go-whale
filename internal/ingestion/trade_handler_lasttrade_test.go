@@ -30,7 +30,7 @@ func TestProcessCandleTrades_EmptySliceDoesNotPanic(t *testing.T) {
 			t.Fatalf("panic on empty candleTrades: %v", r)
 		}
 	}()
-	if err := handler.processCandleTrades("binance", "future", "BTC/USDT", nil, tradeGap{}); err != nil {
+	if err := handler.processCandleTrades(context.Background(), "binance", "future", "BTC/USDT", nil, tradeGap{}); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 }
@@ -48,7 +48,7 @@ func TestProcessCandleTrades_VenueOwnedAll_LastTradeStillWritten(t *testing.T) {
 		handler.MarkVenueOwnedCandles("binance", "future", tf)
 	}
 
-	err := handler.processCandleTrades("binance", "future", "BTC/USDT",
+	err := handler.processCandleTrades(context.Background(), "binance", "future", "BTC/USDT",
 		[]candle.Trade{{ID: "1", Timestamp: time.Now().UnixMilli(), Price: 100, Amount: 1, Side: "buy"}}, tradeGap{})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -72,7 +72,7 @@ func TestProcessCandleTrades_PartialOwnership_BackPressureIntact(t *testing.T) {
 	handler := NewStreamTradeHandler(store, "binance", "future", candle.NewTimeframeRegistry(tfs))
 	handler.MarkVenueOwnedCandles("binance", "future", "5m")
 
-	err := handler.processCandleTrades("binance", "future", "BTC/USDT",
+	err := handler.processCandleTrades(context.Background(), "binance", "future", "BTC/USDT",
 		[]candle.Trade{{ID: "1", Timestamp: time.Now().UnixMilli(), Price: 100, Amount: 1, Side: "buy"}}, tradeGap{})
 	var criticalErr *streaming.CriticalPersistenceError
 	if !errors.As(err, &criticalErr) {

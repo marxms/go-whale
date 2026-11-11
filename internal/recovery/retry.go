@@ -24,8 +24,9 @@ type MemoryRetryScheduler struct {
 	pending   atomic.Bool            // whether processLoop is running
 	reenqueue func(BackfillRetryJob) // hands due jobs back to the worker pipeline (N1 fix)
 
-	ctx context.Context
-	log *slog.Logger
+	ctx    context.Context
+	cancel context.CancelFunc
+	log    *slog.Logger
 }
 
 // SetReenqueue wires the callback used to push a due retry job back into the
@@ -44,13 +45,35 @@ func NewMemoryRetryScheduler(logs ...*slog.Logger) *MemoryRetryScheduler {
 // Start records the context used to stop the processing loop. Guarded by r.mu
 // because processLoop (a separate goroutine) reads it.
 func (r *MemoryRetryScheduler) Start(ctx context.Context) {
+	runCtx, cancel := context.WithCancel(ctx)
 	r.mu.Lock()
-	r.ctx = ctx
+	oldCancel := r.cancel
+	r.ctx = runCtx
+	r.cancel = cancel
+	// A job scheduled before Start would otherwise sit in the queue until the
+	// next Schedule; kick the loop now that a tracked context exists.
+	kick := len(r.queue) > 0 && r.pending.CompareAndSwap(false, true)
 	r.mu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if kick {
+		go r.processLoop()
+	}
 }
 
-// Stop halts the retry loop (idempotent).
-func (r *MemoryRetryScheduler) Stop() {}
+// Stop halts the retry loop (idempotent). The loop reads the context stored by
+// Start, so canceling it is what makes Stop a real stop rather than a no-op.
+func (r *MemoryRetryScheduler) Stop() {
+	r.mu.Lock()
+	cancel := r.cancel
+	r.cancel = nil
+	r.ctx = nil
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
 
 // Schedule adds a failed job to the retry queue with exponential backoff.
 func (r *MemoryRetryScheduler) Schedule(job BackfillRetryJob) {
@@ -92,14 +115,21 @@ func (r *MemoryRetryScheduler) Schedule(job BackfillRetryJob) {
 // processLoop drains due jobs every tick and re-enqueues them via the wired
 // callback, exiting when the queue empties (a later Schedule restarts it).
 func (r *MemoryRetryScheduler) processLoop() {
-	defer r.pending.Store(false)
-
 	r.mu.Lock()
 	ctx := r.ctx
-	r.mu.Unlock()
 	if ctx == nil {
-		ctx = context.Background()
+		// Not started yet: never run untracked by the caller's context. Start or
+		// the next Schedule restarts the loop.
+		r.pending.Store(false)
+		r.mu.Unlock()
+		return
 	}
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.pending.Store(false)
+		r.mu.Unlock()
+	}()
 
 	ticker := time.NewTicker(retryTickInterval)
 	defer ticker.Stop()

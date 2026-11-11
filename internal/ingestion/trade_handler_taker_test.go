@@ -43,7 +43,7 @@ func TestProcessCandleTrades_PreservesTakerFields(t *testing.T) {
 		{ID: "t3", Timestamp: baseTs + 3000, Price: 102, Amount: 3, Side: "buy"},
 	}
 
-	if err := handler.processCandleTrades("binance", "future", "BTC/USDT", trades, tradeGap{}); err != nil {
+	if err := handler.processCandleTrades(context.Background(), "binance", "future", "BTC/USDT", trades, tradeGap{}); err != nil {
 		t.Fatalf("processCandleTrades returned error: %v", err)
 	}
 
@@ -91,7 +91,7 @@ func TestVenueOwned_TheTapeStopsWritingCandlesButKeepsEverythingElse(t *testing.
 	}
 
 	// Before the declaration the tape is the writer.
-	if err := h.HandleTradesWithContext("binance", "future", "ETH/USDT", trade("1", 1_700_000_100_000)); err != nil {
+	if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "ETH/USDT", trade("1", 1_700_000_100_000)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(store.updates) == 0 {
@@ -101,7 +101,7 @@ func TestVenueOwned_TheTapeStopsWritingCandlesButKeepsEverythingElse(t *testing.
 	lastTradesBefore := store.lastTrades
 
 	h.MarkVenueOwnedCandles("binance", "future", "5m")
-	if err := h.HandleTradesWithContext("binance", "future", "ETH/USDT", trade("2", 1_700_000_101_000)); err != nil {
+	if err := h.HandleTradesWithContext(context.Background(), "binance", "future", "ETH/USDT", trade("2", 1_700_000_101_000)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 

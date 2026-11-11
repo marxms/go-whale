@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -60,7 +61,7 @@ func TestProcessCandleTrades_UpdatesAreOldestFirst(t *testing.T) {
 		})
 	}
 
-	if err := handler.processCandleTrades("binance", "future", "BTC/USDT", trades, tradeGap{}); err != nil {
+	if err := handler.processCandleTrades(context.Background(), "binance", "future", "BTC/USDT", trades, tradeGap{}); err != nil {
 		t.Fatalf("processCandleTrades: %v", err)
 	}
 	if len(store.updates) != 5 {
@@ -98,7 +99,7 @@ func TestProcessCandleTrades_OrderHoldsAcrossTimeframes(t *testing.T) {
 		})
 	}
 
-	if err := handler.processCandleTrades("binance", "future", "BTC/USDT", trades, tradeGap{}); err != nil {
+	if err := handler.processCandleTrades(context.Background(), "binance", "future", "BTC/USDT", trades, tradeGap{}); err != nil {
 		t.Fatalf("processCandleTrades: %v", err)
 	}
 

@@ -133,7 +133,7 @@ func WithRetry(ctx context.Context, log *slog.Logger, cfg RetryConfig, label str
 		}
 	}
 
-	return fmt.Errorf("%s: all %d attempts failed: %w", label, cfg.MaxAttempts, lastErr)
+	return fmt.Errorf("%w: %s after %d attempts: %w", ErrAllAttemptsFailed, label, cfg.MaxAttempts, lastErr)
 }
 
 // WithRetryResult executes fn with retry and returns the result on success.

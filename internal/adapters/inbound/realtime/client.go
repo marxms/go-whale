@@ -9,6 +9,7 @@ import (
 
 	"github.com/marxms/go-whale/internal/candle"
 	"github.com/marxms/go-whale/internal/distribution"
+	"github.com/marxms/go-whale/internal/market"
 )
 
 // maxClientMessageSize bounds an inbound client control message (subscribe requests
@@ -162,11 +163,38 @@ func (c *Client) readPump(h *distribution.Hub) {
 		}
 		switch req.Action {
 		case "subscribe":
-			h.Subscribe(c, req.Scope)
+			if validScope(req.Scope) {
+				h.Subscribe(c, req.Scope)
+			}
 		case "unsubscribe":
 			h.Unsubscribe(c, req.Scope)
 		}
 	}
+}
+
+// validScope admits only the canonical vocabulary the capability matrix declares. It
+// keeps an authenticated client from turning an arbitrary string into a hub map entry;
+// the per-connection subscription cap bounds the remaining symbol/timeframe combinations.
+func validScope(scope Scope) bool {
+	if scope.Symbol == "" || scope.Timeframe == "" {
+		return false
+	}
+	if _, err := market.ParseExchange(scope.Exchange); err != nil {
+		return false
+	}
+	if _, err := market.ParseMarketType(scope.MarketType); err != nil {
+		return false
+	}
+	if market.CapabilitiesFor(scope.Exchange, scope.MarketType) == nil {
+		return false
+	}
+	if _, err := market.ParseSymbol(scope.Symbol); err != nil {
+		return false
+	}
+	if _, err := market.ParseTimeframe(scope.Timeframe); err != nil {
+		return false
+	}
+	return true
 }
 
 // writePump is the SOLE writer of data frames. It drains the lossless lane one

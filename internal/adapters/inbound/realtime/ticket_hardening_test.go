@@ -59,7 +59,7 @@ func newHardeningServer(t *testing.T, secret []byte, origins []string, authDisab
 	h := NewHub(newFakeOpens(), func() int64 { return 1 }, hubOpts...)
 	h.Start()
 	t.Cleanup(func() { stopHub(t, h) })
-	s := NewServer(h, secret, origins, 30*time.Second, func() int64 { return now.Load() }, authDisabled)
+	s := NewServer(h, secret, secret, origins, 30*time.Second, func() int64 { return now.Load() }, authDisabled)
 	ts := httptest.NewServer(http.HandlerFunc(s.ServeWS))
 	t.Cleanup(ts.Close) // LIFO: the HTTP server closes before the hub stops
 	return &hardeningServer{hub: h, srv: s, wsURL: "ws" + strings.TrimPrefix(ts.URL, "http"), nowMs: now}

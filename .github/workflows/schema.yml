@@ -1,0 +1,97 @@
+# Schema proof against the same QuestDB tag used in production. The live cases create
+# their own probe table, declare the expected columns and dedup keys in Go, apply the
+# additive DDL twice and require zero ALTERs, so the expectation is not derived from
+# the live table it checks.
+name: Schema
+
+on:
+  push:
+    branches: [developer, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  schema:
+    name: schema (QuestDB 8.2.3)
+    runs-on: ubuntu-latest
+
+    services:
+      questdb:
+        image: questdb/questdb:8.2.3@sha256:1e109276b61087010d8a3a0b033c313fcb26f6af898cbdc30f53e51cf494d0c5
+        ports:
+          # 9000 is HTTP/ILP; 8812 is pgwire for the live schema cases.
+          - 9000:9000
+          - 8812:8812
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # No health-cmd: the image has no curl; readiness is measured from the runner.
+      - name: Wait for QuestDB
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 90); do
+            if curl -sf -G --data-urlencode "query=select 1" http://localhost:9000/exec \
+                 | grep -q '"dataset"'; then
+              echo "QuestDB is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "QuestDB did not answer in 90s — the schema check did NOT run, and not running is not passing" >&2
+          exit 1
+
+      # A tag can be moved; the live assertion is the engine build string.
+      - name: Assert the engine version
+        run: |
+          set -euo pipefail
+          build="$(curl -sf -G --data-urlencode "query=select build" http://localhost:9000/exec)"
+          echo "${build}"
+          echo "${build}" | grep -q '8\.2\.3' || {
+            echo "REFUSED: the engine is not QuestDB 8.2.3 — the partition/WAL proof is only valid against the production tag" >&2
+            exit 1
+          }
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26.10"
+          cache-dependency-path: go.sum
+
+      # A skip with the engine up is a failure: the environment did not reach the test.
+      - name: DDL idempotence and independent declaration
+        env:
+          # Ephemeral container defaults.
+          QDB_LIVE_PG: postgres://admin:quest@localhost:8812/qdb
+        run: |
+          set -euo pipefail
+
+          declared="$(go test -list 'TestEnsureColumnsLive' ./internal/adapters/outbound/questdb/ | grep -c '^Test' || true)"
+          if [ "${declared:-0}" -eq 0 ]; then
+            echo "no TestEnsureColumnsLive case in ./internal/adapters/outbound/questdb/ — the schema proof is gone from the repository" >&2
+            exit 1
+          fi
+          echo "live schema cases declared: ${declared}"
+
+          output="$(mktemp)"
+          go test -race -count=1 -v -run 'TestEnsureColumnsLive' ./internal/adapters/outbound/questdb/ 2>&1 | tee "${output}"
+
+          if grep -q -- '--- SKIP' "${output}"; then
+            echo "" >&2
+            echo "REFUSED: a live schema case SKIPPED with the engine up. QDB_LIVE_PG/QDB_LIVE_ILP did not reach the process, and skipping is not passing." >&2
+            grep -- '--- SKIP' "${output}" >&2
+            exit 1
+          fi
+
+          passed="$(grep -c '^--- PASS: ' "${output}" || true)"
+          if [ "${passed:-0}" -ne "${declared}" ]; then
+            echo "" >&2
+            echo "REFUSED: ${passed} case(s) passed, ${declared} declared by -list." >&2
+            exit 1
+          fi
+          echo "APPROVED: ${passed} of ${declared} live schema cases ran against questdb:8.2.3"

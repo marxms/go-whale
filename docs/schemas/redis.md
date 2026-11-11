@@ -9,6 +9,10 @@ Key building blocks are the exchange id, the canonical market type (`spot` or
 `future`), the symbol (`BASE/QUOTE`) and the timeframe (`5m`, `1h`, `1d`, ...).
 Components are joined with `:`; no component is escaped.
 
+These are the families GoWhale owns. The pruner never unlinks another
+application's keys; `indicators:*`, `analyzer:*` and `signalEvidence:*` are not
+GoWhale families and must not be deleted by this service.
+
 ## Candle keys
 
 ### `candles:{exchange}:{marketType}:{symbol}:{timeframe}`

@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"context"
 	"testing"
 
 	"github.com/marxms/go-whale/internal/candle"
@@ -14,7 +15,7 @@ func deliveryTestHandler() *StreamTradeHandler {
 
 func feedOneTrade(t *testing.T, h *StreamTradeHandler, exchange, marketType, symbol string) {
 	t.Helper()
-	err := h.HandleTradesWithContext(exchange, marketType, symbol, []trade.Trade{{
+	err := h.HandleTradesWithContext(context.Background(), exchange, marketType, symbol, []trade.Trade{{
 		ID:        "1",
 		Symbol:    symbol,
 		Price:     100,

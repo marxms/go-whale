@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -p 1 -trimpath \
       -X github.com/marxms/go-whale/internal/platform/version.Date=${DATE}" \
     -o /out/gowhale ./cmd/gowhale
 
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
 
 # The Alpine base already ships the CA bundle and busybox wget, so the runtime
 # image installs no extra packages: wget serves the healthcheck and the CA

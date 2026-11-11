@@ -56,7 +56,7 @@ func BuildOpenAPISpecFromRoutes(routes chi.Routes) map[string]any {
 			openAPIKeyDescription: "Automatically generated from Chi route mapping.",
 		},
 		"servers": []map[string]any{
-			{"url": "http://localhost:3001"},
+			{"url": "http://localhost:3000"},
 		},
 		"paths": paths,
 	}

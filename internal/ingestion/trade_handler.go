@@ -270,9 +270,9 @@ func (h *StreamTradeHandler) reportMissing(exchange, marketType, compositeKey st
 		"suppressed", suppressed)
 }
 
-// HandleTradesWithContext processes trades with explicit exchange/marketType context
-// This is the preferred method for multi-exchange support.
-func (h *StreamTradeHandler) HandleTradesWithContext(exchange, marketType, symbol string, trades any) error {
+// HandleTradesWithContext processes trades with the caller's context and explicit
+// exchange/marketType. This is the preferred method for multi-exchange support.
+func (h *StreamTradeHandler) HandleTradesWithContext(ctx context.Context, exchange, marketType, symbol string, trades any) error {
 	if trades == nil {
 		return nil
 	}
@@ -281,21 +281,21 @@ func (h *StreamTradeHandler) HandleTradesWithContext(exchange, marketType, symbo
 	switch t := trades.(type) {
 	case []trade.Trade:
 		// Native client trades (BingX, Binance)
-		return h.handleDomainTradesWithContext(exchange, marketType, symbol, t)
+		return h.handleDomainTradesWithContext(ctx, exchange, marketType, symbol, t)
 	default:
 		// Map-shaped trades (fallback)
-		return h.handleMapTradesWithContext(exchange, marketType, symbol, trades)
+		return h.handleMapTradesWithContext(ctx, exchange, marketType, symbol, trades)
 	}
 }
 
 // HandleTrades is backward compatible and uses the default exchange/marketType.
 // Accepts: []trade.Trade or []map[string]interface{}.
 func (h *StreamTradeHandler) HandleTrades(symbol string, trades any) error {
-	return h.HandleTradesWithContext(h.defaultExchange, h.defaultMarketType, symbol, trades)
+	return h.HandleTradesWithContext(context.Background(), h.defaultExchange, h.defaultMarketType, symbol, trades)
 }
 
 // handleDomainTradesWithContext processes native-client trades with explicit context.
-func (h *StreamTradeHandler) handleDomainTradesWithContext(exchange, marketType, symbol string, tradeList []trade.Trade) error {
+func (h *StreamTradeHandler) handleDomainTradesWithContext(ctx context.Context, exchange, marketType, symbol string, tradeList []trade.Trade) error {
 	if len(tradeList) == 0 {
 		return nil
 	}
@@ -418,12 +418,12 @@ func (h *StreamTradeHandler) handleDomainTradesWithContext(exchange, marketType,
 		return nil
 	}
 
-	return h.processCandleTrades(exchange, marketType, symbol, candleTrades, gap)
+	return h.processCandleTrades(ctx, exchange, marketType, symbol, candleTrades, gap)
 }
 
 // handleMapTradesWithContext processes map-shaped trades with explicit exchange/marketType
 // context.
-func (h *StreamTradeHandler) handleMapTradesWithContext(exchange, marketType, symbol string, trades any) error {
+func (h *StreamTradeHandler) handleMapTradesWithContext(ctx context.Context, exchange, marketType, symbol string, trades any) error {
 	tradeList, err := normalizeTrades(trades)
 	if err != nil {
 		logger.OrDiscard(h.log).Error("trade handler: normalize trades failed",
@@ -523,11 +523,11 @@ func (h *StreamTradeHandler) handleMapTradesWithContext(exchange, marketType, sy
 	logger.OrDiscard(h.log).Info("trade handler: new trades admitted",
 		"key", compositeKey, "trades", len(candleTrades), "total_volume", totalVol)
 
-	return h.processCandleTrades(exchange, marketType, symbol, candleTrades, gap)
+	return h.processCandleTrades(ctx, exchange, marketType, symbol, candleTrades, gap)
 }
 
 // processCandleTrades generates candles and MARKS the buckets whose tape arrived incomplete.
-func (h *StreamTradeHandler) processCandleTrades(exchange, marketType, symbol string, candleTrades []candle.Trade, gap tradeGap) error {
+func (h *StreamTradeHandler) processCandleTrades(ctx context.Context, exchange, marketType, symbol string, candleTrades []candle.Trade, gap tradeGap) error {
 	// No trades, nothing to do: without this guard the last-trade write indexes an empty slice.
 	if len(candleTrades) == 0 {
 		return nil
@@ -629,7 +629,7 @@ func (h *StreamTradeHandler) processCandleTrades(exchange, marketType, symbol st
 	// The batch is conditional; the last trade is not. Once the venue owns every timeframe,
 	// updates is empty and an early return would freeze /api/trades. A critical persistence
 	// failure still returns before the last-trade write.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	if len(updates) > 0 {

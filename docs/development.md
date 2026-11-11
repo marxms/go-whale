@@ -87,7 +87,8 @@ psql "postgres://admin:quest@localhost:8812/qdb" \
 a static reachability tool cannot see test-only helpers, interface implementations
 or the public constructors a consumer may use. An unreachable function must still
 have a caller, a test that exercises it, or a documented interface role before it
-enters the tree; "it might be useful" is not a reason to keep it.
+enters the tree; "it might be useful" is not a reason to keep it. See
+[`dead-code.md`](dead-code.md) for the public survivor ledger.
 
 ## Adding an exchange
 
