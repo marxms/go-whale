@@ -162,6 +162,7 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 		"candle_seed_ancestor_revisions_unconfirmed_total", "candle_late_update_total",
 		"candle_seed_merge_total", "candle_seed_ancestor_unadmitted_evicted_series_total",
 		"candle_seed_ancestor_outside_cold_retention_total", "cold_append_aborted_total",
+		"candle_sanity_violation_total",
 		// derivatives collector
 		"gowhale_derivatives_feed_available", "gowhale_derivatives_feed_request_total",
 		"gowhale_derivatives_collected_points", "gowhale_derivatives_collected_span_seconds",
@@ -201,8 +202,8 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 			t.Errorf("%s is missing from the exposition — the metric was renamed, dropped or never registered", name)
 		}
 	}
-	if len(expected) != 90 {
-		t.Fatalf("inventory has %d names, want the 90 definitions T44 moved", len(expected))
+	if len(expected) != 91 {
+		t.Fatalf("inventory has %d names, want the 91 definitions T44 moved", len(expected))
 	}
 	// The histogram bucket boundaries are part of the wire contract.
 	assertBuckets(t, reg, "gowhale_coinalyze_cycle_duration_seconds", []float64{30, 60, 120, 240, 480, 960, 1920, 3840, 7680, 15360})
