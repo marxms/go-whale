@@ -53,6 +53,10 @@ func TestUnionSeedInto_LoweringMarksTheBucket(t *testing.T) {
 			"bucket closed claiming to be intact, so the targeted re-read that already exists " +
 			"never fires and the substitution is invisible forever")
 	}
+	if got.GapKind != GapProvisional {
+		t.Errorf("GapKind = %v after a forced replacement, want GapProvisional — a value that "+
+			"may be wrong in the prices must not be folded into a derived parent as if settled", got.GapKind)
+	}
 
 	// The symmetric case must NOT mark: healing upward discards nothing.
 	higher := lower

@@ -31,6 +31,43 @@ func (ce *CandleEngine) FoldUp(exchange, marketType, symbol, childTF string, chi
 	}
 }
 
+// RepairAncestors rebuilds every coarser bucket containing each marked child bucket.
+//
+// FoldUp runs only for a live frame, so a closed parent otherwise keeps its pre-mark value and
+// still claims HasGap=false. Call it outside the engine lock: FoldUp takes ce.mu itself.
+func (ce *CandleEngine) RepairAncestors(exchange, marketType, childTF string, marks []MarkedGap) {
+	for _, m := range marks {
+		ce.FoldUp(exchange, marketType, m.Symbol, childTF, m.Timestamp)
+	}
+}
+
+// notifyGapChange arms the revision callback for a completeness change on a stored parent. A bucket
+// that has not closed yet is not announced. Call it while holding ce.mu.
+func (ce *CandleEngine) notifyGapChange(
+	key CompositeKey,
+	revised candle.Candle,
+	step candle.FoldStep,
+	parentTS, now int64,
+	existingOnly bool,
+) func() {
+	tfMs, _ := candle.ParseTimeframeMs(step.TF)
+	if tfMs <= 0 || parentTS+tfMs > now {
+		return nil
+	}
+	if existingOnly {
+		ce.markSeedRepairLocked(key, parentTS)
+		ce.metrics.incFoldSeedRevision()
+	}
+	fn := ce.onRevised
+	if existingOnly && ce.onSeedRevised != nil {
+		fn = ce.onSeedRevised
+	}
+	if fn == nil {
+		return nil
+	}
+	return func() { fn(key, revised) }
+}
+
 // rebuildFromChildren recomputes one parent bucket and reports whether it was written.
 func (ce *CandleEngine) rebuildFromChildren(exchange, marketType, symbol string, step candle.FoldStep, parentTS int64, existingOnly bool) bool {
 	ce.mu.Lock()
@@ -56,6 +93,21 @@ func (ce *CandleEngine) rebuildFromChildren(exchange, marketType, symbol string,
 		return false
 	}
 	parent := candle.FoldFromChildren(kids, parentTS)
+	// The fold is the only writer of a derived timeframe, so without this the parent's freshness
+	// watermark never advances and /health reports a healthy 5m beside a frozen 30m.
+	ce.noteBucketTimestamp(exchange, marketType, step.TF, parentTS)
+
+	// A folded bar that contradicts its children is never published as clean: marking keeps the
+	// value fresh while telling consumers it is unproven, where refusing would freeze the bucket.
+	if violations := candle.ValidateFoldedParent(parent, kids); len(violations) > 0 {
+		for _, violation := range violations {
+			ce.metrics.incCandleSanityViolation(exchange, marketType, step.TF, string(violation))
+		}
+		parent.HasGap = true
+		if parent.GapKind != candle.GapProvisional {
+			parent.GapKind = candle.GapProvisional
+		}
+	}
 
 	buf := ce.getOrCreate(key)
 	for i := 0; i < buf.Len(); i++ {
@@ -64,6 +116,19 @@ func (ce *CandleEngine) rebuildFromChildren(exchange, marketType, symbol string,
 			continue
 		}
 		if old.Origin == candle.OriginNative {
+			// A native parent keeps its VALUES, but completeness is not one of them: a child heard
+			// partially makes the parent's coverage unproven, so the mark travels even when the
+			// rebuild is skipped.
+			hasGap, gapKind := candle.MergeGapMark(old, parent)
+			if hasGap == old.HasGap && gapKind == old.GapKind {
+				return true
+			}
+			gapChanged := old.HasGap != hasGap
+			old.HasGap, old.GapKind = hasGap, gapKind
+			buf.SetAt(i, old)
+			if gapChanged {
+				callback = ce.notifyGapChange(key, old, step, parentTS, now, existingOnly)
+			}
 			return true
 		}
 		if candle.SameFoldValues(old, parent) {
@@ -71,43 +136,17 @@ func (ce *CandleEngine) rebuildFromChildren(exchange, marketType, symbol string,
 			// the financial payload is unchanged. A completeness change is
 			// observable; source/origin alone do not emit a revision.
 			gapChanged := old.HasGap != parent.HasGap
-			old.Source, old.Origin, old.HasGap = parent.Source, parent.Origin, parent.HasGap
+			old.Source, old.Origin, old.HasGap, old.GapKind = parent.Source, parent.Origin, parent.HasGap, parent.GapKind
 			buf.SetAt(i, old)
-			tfMs, _ := candle.ParseTimeframeMs(step.TF)
-			if gapChanged && tfMs > 0 && parentTS+tfMs <= now {
-				if existingOnly {
-					ce.markSeedRepairLocked(key, parentTS)
-					ce.metrics.incFoldSeedRevision()
-				}
-				fn := ce.onRevised
-				if existingOnly && ce.onSeedRevised != nil {
-					fn = ce.onSeedRevised
-				}
-				if fn != nil {
-					revised := old
-					callback = func() { fn(key, revised) }
-				}
+			if gapChanged {
+				callback = ce.notifyGapChange(key, old, step, parentTS, now, existingOnly)
 			}
 			return true
 		}
 		parent.CreatedAt, parent.LastUpdate = old.CreatedAt, now
 		parent.LateTradeCount = old.LateTradeCount
 		buf.SetAt(i, parent)
-		tfMs, _ := candle.ParseTimeframeMs(step.TF)
-		if tfMs > 0 && parentTS+tfMs <= now {
-			if existingOnly {
-				ce.markSeedRepairLocked(key, parentTS)
-				ce.metrics.incFoldSeedRevision()
-			}
-			fn := ce.onRevised
-			if existingOnly && ce.onSeedRevised != nil {
-				fn = ce.onSeedRevised
-			}
-			if fn != nil {
-				revised := parent
-				callback = func() { fn(key, revised) }
-			}
-		}
+		callback = ce.notifyGapChange(key, parent, step, parentTS, now, existingOnly)
 		return true
 	}
 	latest, hasLatest := buf.PeekLatest()

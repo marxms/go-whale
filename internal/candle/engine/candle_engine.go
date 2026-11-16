@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -50,6 +51,8 @@ type CandleEngine struct {
 
 	// metrics is the injected observability port. Zero value = safe no-op.
 	metrics Metrics
+	// tfWatermarks holds the newest bucket timestamp per (exchange, marketType, timeframe).
+	tfWatermarks sync.Map
 }
 
 // SetMetrics injects the observability port. The composition root calls it before the
@@ -194,31 +197,95 @@ func (ce *CandleEngine) OldestBucketTimestamp(exchange, marketType, symbol, tf s
 	return oldest.Timestamp, true
 }
 
-// MarkOpenBucketGapped stamps each symbol's newest bucket as known-incomplete and reports how many
-// it marked.
+// MarkedGap names one bucket a gap mark touched, so the caller can repair its ancestors after the
+// lock is released.
+type MarkedGap struct {
+	Symbol    string
+	Timestamp int64
+}
+
+// MarkOpenBucketGapped stamps each symbol's newest bucket as known-incomplete and reports what it
+// marked.
 //
 // Venue frames carry a running total, so an interruption spanning a bucket's close is permanently
-// lossy: the venue never resends a finished bucket. Marking records that knowledge and unlocks the
-// targeted re-read and the veto exception in candle.VenueHasSpoken. Symbols must be the exact
-// strings the feed publishes under; this engine normalizes nothing.
-func (ce *CandleEngine) MarkOpenBucketGapped(exchange, marketType, tf string, symbols []string) int {
+// lossy: the venue never resends a finished bucket. Symbols must be the exact strings the feed
+// publishes under; this engine normalizes nothing.
+func (ce *CandleEngine) MarkOpenBucketGapped(exchange, marketType, tf string, symbols []string) []MarkedGap {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
-	marked := 0
+	marked := make([]MarkedGap, 0, len(symbols))
 	for _, sym := range symbols {
 		buf, ok := ce.buffers[CompositeKey{exchange, marketType, sym, tf}]
 		if !ok {
 			continue
 		}
+		var ts int64
 		buf.UpdateLatest(func(latest *candle.Candle) {
-			if !latest.HasGap {
-				latest.HasGap = true
-				marked++
+			if latest.HasGap {
+				return
 			}
+			latest.HasGap = true
+			// The venue's kline frame carries the prices; what a restart hole costs is the
+			// running volume total. Recording that kind is what lets the fold rebuild a
+			// derived parent from this bucket instead of freezing it.
+			latest.GapKind = candle.GapVolumeIncomplete
+			ts = latest.Timestamp
 		})
+		if ts != 0 {
+			marked = append(marked, MarkedGap{Symbol: sym, Timestamp: ts})
+		}
 	}
 	return marked
+}
+
+// TimeframeFreshness reports how long ago the newest bucket of one timeframe was written, for the
+// scopes a caller asks about. A per-scope aggregate cannot see a DERIVED timeframe freeze: the 5m
+// keeps advancing while the 30m stops, and the operator sees "healthy".
+type TimeframeFreshness struct {
+	Scope       string
+	Timeframe   string
+	NewestAgeMs int64
+	HaveData    bool
+}
+
+// tfWatermark is the newest bucket timestamp written per (exchange, marketType, timeframe).
+type tfWatermark struct{ ms atomic.Int64 }
+
+// noteBucketTimestamp advances the timeframe's watermark. Lock-free: it runs on the ingest hot
+// path, once per frame.
+func (ce *CandleEngine) noteBucketTimestamp(exchange, marketType, tf string, ts int64) {
+	key := exchange + "|" + marketType + "|" + tf
+	value, _ := ce.tfWatermarks.LoadOrStore(key, &tfWatermark{})
+	w := value.(*tfWatermark)
+	for {
+		current := w.ms.Load()
+		if ts <= current {
+			return
+		}
+		if w.ms.CompareAndSwap(current, ts) {
+			return
+		}
+	}
+}
+
+// TimeframeFreshness reports one row per requested timeframe.
+func (ce *CandleEngine) TimeframeFreshness(exchange, marketType string, timeframes []string, nowMs int64) []TimeframeFreshness {
+	out := make([]TimeframeFreshness, 0, len(timeframes))
+	for _, tf := range timeframes {
+		row := TimeframeFreshness{Scope: exchange + ":" + marketType, Timeframe: tf}
+		if value, ok := ce.tfWatermarks.Load(exchange + "|" + marketType + "|" + tf); ok {
+			if ms := value.(*tfWatermark).ms.Load(); ms > 0 {
+				row.HaveData = true
+				row.NewestAgeMs = nowMs - ms
+				if row.NewestAgeMs < 0 {
+					row.NewestAgeMs = 0
+				}
+			}
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // UpdateCandle merges a single candle into the stream's buffer. Same-bucket updates merge by the
@@ -226,6 +293,7 @@ func (ce *CandleEngine) MarkOpenBucketGapped(exchange, marketType, tf string, sy
 // repair. A bucket previously written from a REST total uses the source-dispatched merge so a
 // retry cannot double-count.
 func (ce *CandleEngine) UpdateCandle(exchange, marketType, symbol, tf string, c candle.Candle) {
+	ce.noteBucketTimestamp(exchange, marketType, tf, c.Timestamp)
 	if c.Source == string(candle.CandleMergeSourceWSKline) && c.Origin == candle.OriginUnknown {
 		c.Origin = candle.OriginNative
 	}
