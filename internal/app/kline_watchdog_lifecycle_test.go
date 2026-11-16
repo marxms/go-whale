@@ -23,6 +23,13 @@ type controlledKlineFeed struct {
 	stopped bool
 	start   func([]string) error
 	add     func([]string) error
+
+	// Optional partition-scoped capability. Default false so the existing fleet-path tests keep
+	// exercising the fleet path; a test that wants the scoped path sets partitionSilent.
+	partitionSilent bool
+	victim          binancesdk.PartitionStat
+	victimMembers   []string
+	restartedParts  []int
 }
 
 func (f *controlledKlineFeed) Start(symbols []string) error {
@@ -49,6 +56,18 @@ func (f *controlledKlineFeed) SecondsSinceLastFrame() (float64, bool) {
 }
 func (f *controlledKlineFeed) QuietestPartition() (float64, int) { return f.silent, 1 }
 func (f *controlledKlineFeed) NeedsRestart() bool                { return f.restart }
+
+func (f *controlledKlineFeed) SilentPartition(float64) (binancesdk.PartitionStat, []string, bool) {
+	if !f.partitionSilent {
+		return binancesdk.PartitionStat{}, nil, false
+	}
+	return f.victim, f.victimMembers, true
+}
+
+func (f *controlledKlineFeed) RestartPartition(id int) error {
+	f.restartedParts = append(f.restartedParts, id)
+	return nil
+}
 
 func watchdogCandle(ts int64, volume float64) candle.Candle {
 	return candle.Candle{

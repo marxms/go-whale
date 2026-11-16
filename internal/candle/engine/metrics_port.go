@@ -14,6 +14,7 @@ type Metrics struct {
 	SeedRepairEvicted             func()
 	SeedRepairOutsideRetention    func()
 	ColdAppendAborted             func()
+	CandleSanityViolationTotal    func(exchange, marketType, timeframe, violation string)
 
 	ColdMissingBuckets  func(exchange, marketType, timeframe string, v float64)
 	ColdSymbolsWithGaps func(exchange, marketType, timeframe string, v float64)
@@ -67,6 +68,12 @@ func (m Metrics) incLateUpdate(exchange, marketType, timeframe, reason string) {
 func (m Metrics) addSeedMerge(exchange, marketType, timeframe, outcome string, n float64) {
 	if m.CandleSeedMergeTotal != nil {
 		m.CandleSeedMergeTotal(exchange, marketType, timeframe, outcome, n)
+	}
+}
+
+func (m Metrics) incCandleSanityViolation(exchange, marketType, timeframe, violation string) {
+	if m.CandleSanityViolationTotal != nil {
+		m.CandleSanityViolationTotal(exchange, marketType, timeframe, violation)
 	}
 }
 

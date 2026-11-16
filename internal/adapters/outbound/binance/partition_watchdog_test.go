@@ -2,7 +2,6 @@ package binancesdk
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +13,7 @@ import (
 // reconnect even while a sibling partition is fully live — the case the aggregate
 // monitor is structurally blind to.
 func TestPartitionLivenessWatchdogTriggersOnDeadPartition(t *testing.T) {
-	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan string, 1)}
+	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan reconnectRequest, 1)}
 	now := time.Now().UnixMilli()
 	for i := 0; i < 6; i++ { // partition 0: dead
 		s := fmt.Sprintf("DEAD%d", i)
@@ -30,9 +29,9 @@ func TestPartitionLivenessWatchdogTriggersOnDeadPartition(t *testing.T) {
 	c.checkPartitionLiveness()
 
 	select {
-	case reason := <-c.reconnectCh:
-		if !strings.Contains(reason, "partition 0") {
-			t.Fatalf("reconnect reason should name the dead partition 0: %q", reason)
+	case req := <-c.reconnectCh:
+		if req.partition != 0 {
+			t.Fatalf("reconnect request must name the dead partition 0: %+v", req)
 		}
 	default:
 		t.Fatal("dead partition did not trigger a reconnect — O1 would persist")
@@ -44,7 +43,7 @@ func TestPartitionLivenessWatchdogTriggersOnDeadPartition(t *testing.T) {
 // that got the per-symbol STEP2 watchdog discarded): the trigger is the stale
 // FRACTION, not any one symbol's silence.
 func TestPartitionLivenessWatchdogIgnoresIlliquidSingleSymbol(t *testing.T) {
-	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan string, 1)}
+	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan reconnectRequest, 1)}
 	now := time.Now().UnixMilli()
 	c.ledger.Assign("ILLIQUID", 0)
 	c.ledger.Stamp("ILLIQUID", now-livenessStaleThresholdMs-10_000) // 1 stale
@@ -66,7 +65,7 @@ func TestPartitionLivenessWatchdogIgnoresIlliquidSingleSymbol(t *testing.T) {
 // TestPartitionLivenessWatchdogHoldsDuringReconnect proves the watchdog does not
 // pile on while a reconnect is already in progress.
 func TestPartitionLivenessWatchdogHoldsDuringReconnect(t *testing.T) {
-	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan string, 1)}
+	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan reconnectRequest, 1)}
 	c.reconnecting.Store(true)
 	now := time.Now().UnixMilli()
 	for i := 0; i < 6; i++ {

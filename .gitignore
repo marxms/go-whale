@@ -12,3 +12,6 @@
 
 # Local runtime state (benchmarks, scratch files)
 /.runtime/
+
+# macOS
+.DS_Store

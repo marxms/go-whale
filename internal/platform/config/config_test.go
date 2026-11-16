@@ -371,7 +371,12 @@ func TestValidateRealtimeEdgeSecrets(t *testing.T) {
 		{name: "both strong", ticket: strong, mint: strong},
 		{name: "both empty disables the edge"},
 		{name: "explicit local escape", authDisabled: true},
-		{name: "missing mint token", ticket: strong, want: "BOTH"},
+		// The edge serves the chart with TICKET_SECRET alone: it signs the ticket the browser
+		// presents. The mint token belongs to a different topology, and its absence only disables
+		// that endpoint.
+		{name: "ticket alone serves the edge", ticket: strong},
+		{name: "mint alone builds nothing", mint: strong},
+		{name: "short mint", ticket: strong, mint: "short", want: "at least 32"},
 		{name: "short ticket", ticket: "short", mint: strong, want: "at least 32"},
 		{name: "placeholder ticket", ticket: "replace-with-a-long-random-secret", mint: strong, want: "placeholder"},
 		{name: "placeholder mint", ticket: strong, mint: strings.Repeat("replace-with-", 4), want: "placeholder"},

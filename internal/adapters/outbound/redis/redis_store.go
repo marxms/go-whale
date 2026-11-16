@@ -78,6 +78,11 @@ type RedisStore struct {
 	// subCache memoizes GetAllActiveSymbols for this store. It is per-instance state: a cache
 	// shared across stores would let one store serve data another had already invalidated.
 	subCache cachedSubscriptions
+	// fleet is the subscription set discovery selected, per scope. It exists so a write cannot
+	// widen the authoritative registry: gap backfills and seeds still run for symbols that are no
+	// longer subscribed, and every one of them used to re-register itself.
+	fleetMu sync.RWMutex
+	fleet   map[string]map[string]struct{}
 }
 
 // NewRedisStore builds the hot tier and verifies connectivity. ctx bounds the startup ping
@@ -469,7 +474,9 @@ func (s *RedisStore) ReplaceCandle(ctx context.Context, exchange, marketType, sy
 	pipe := s.client.Pipeline()
 	pipe.ZRemRangeByScore(ctx, key, score, score)
 	pipe.ZAdd(ctx, key, redis.Z{Score: float64(candle.Timestamp), Member: payload})
-	// ReplaceCandle is used by reconnection_sync (backfill) — it does not apply a cap.
+	// Deliberately not capped: this path restores one bucket with no cold counterpart, and it is
+	// usually the oldest — exactly what a rank truncation would erase first. Growth is bounded by
+	// the recovery window, not by this writer.
 
 	tctx, cancel := context.WithTimeout(ctx, redisOpTimeoutV2)
 	_, err = pipe.Exec(tctx)
@@ -647,8 +654,42 @@ func (s *RedisStore) GetCandlesRange(_ context.Context, _, _, _, _ string, _, _ 
 // SYMBOL/TIMEFRAME TRACKING
 // ============================================================================
 
+// SetFleet records the subscribed symbols of one scope. An empty list is ignored: "no fleet known"
+// must keep the old behaviour rather than forbid everything.
+func (s *RedisStore) SetFleet(exchange, marketType string, symbols []string) {
+	if len(symbols) == 0 {
+		return
+	}
+	set := make(map[string]struct{}, len(symbols))
+	for _, symbol := range symbols {
+		set[symbol] = struct{}{}
+	}
+	s.fleetMu.Lock()
+	if s.fleet == nil {
+		s.fleet = make(map[string]map[string]struct{}, 4)
+	}
+	s.fleet[exchange+"|"+marketType] = set
+	s.fleetMu.Unlock()
+}
+
+// fleetAllows reports whether a symbol may be registered. An UNKNOWN scope allows the write: the
+// guard exists to stop a known outsider, never to invent a restriction from missing evidence.
+func (s *RedisStore) fleetAllows(exchange, marketType, symbol string) bool {
+	s.fleetMu.RLock()
+	defer s.fleetMu.RUnlock()
+	scoped, known := s.fleet[exchange+"|"+marketType]
+	if !known {
+		return true
+	}
+	_, allowed := scoped[symbol]
+	return allowed
+}
+
 // AddActiveSymbol records a symbol in its scope and invalidates the subscription cache.
 func (s *RedisStore) AddActiveSymbol(ctx context.Context, exchange, marketType, symbol string) error {
+	if !s.fleetAllows(exchange, marketType, symbol) {
+		return nil
+	}
 	key := activeSymbolsKeyV2(exchange, marketType)
 	tctx, cancel := ensureTimeout(ctx, redisDefaultOpTimeout)
 	err := s.client.SAdd(tctx, key, symbol).Err()

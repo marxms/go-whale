@@ -69,15 +69,16 @@ const (
 // Component names and top-level status strings published by /health. They are the wire
 // contract consumed by probes and dashboards, so the aggregation spells them once.
 const (
-	componentConnections       = "connections"
-	componentExpectedScopes    = "expected_scopes"
-	componentFleetLiveness     = "fleet_liveness"
-	componentFeedProducer      = "feed_producer"
-	componentCoverage          = "coverage"
-	componentColdWrite         = "cold_write"
-	componentGCHeadroom        = "gc_headroom"
-	componentDerivativesPoller = "derivatives_poller"
-	componentTimeframeChecksum = "timeframe_checksum"
+	componentConnections        = "connections"
+	componentExpectedScopes     = "expected_scopes"
+	componentFleetLiveness      = "fleet_liveness"
+	componentFeedProducer       = "feed_producer"
+	componentCoverage           = "coverage"
+	componentColdWrite          = "cold_write"
+	componentGCHeadroom         = "gc_headroom"
+	componentDerivativesPoller  = "derivatives_poller"
+	componentTimeframeChecksum  = "timeframe_checksum"
+	componentTimeframeFreshness = "timeframe_freshness"
 
 	statusHealthy   = "healthy"
 	statusUnhealthy = "unhealthy"
@@ -125,6 +126,27 @@ type CandleFreshnessReport struct {
 	FreshestAgoMs int64   `json:"freshest_ago_ms"`
 }
 
+// TimeframeFreshness is one timeframe's data age, as the producer sees it.
+type TimeframeFreshness struct {
+	Scope        string
+	Timeframe    string
+	NewestAgeMs  int64
+	HaveData     bool
+	StaleAfterMs int64
+}
+
+// TimeframeFreshnessReport is the wire detail published under timeframe_freshness.
+//
+// A frozen derived timeframe is invisible in a per-scope aggregate: the 5m keeps advancing while
+// the 30m stops. This block names each timeframe's age and whether it crossed its freeze threshold.
+type TimeframeFreshnessReport struct {
+	Scope        string `json:"scope"`
+	Timeframe    string `json:"timeframe"`
+	NewestAgoMs  int64  `json:"newest_ago_ms"`
+	StaleAfterMs int64  `json:"stale_after_ms"`
+	Stale        bool   `json:"stale"`
+}
+
 // GaugeSink is the output side of the aggregation: the two coverage gauges and the
 // liveness gauge. Nil function fields are safe no-ops. A sink is not a check: its absence
 // changes nothing about the reported status.
@@ -153,6 +175,9 @@ type Probes struct {
 	// CandleFreshness returns the per-scope detail behind the fleet-liveness verdict:
 	// newest readable age, monitored symbols and stale symbols.
 	CandleFreshness func() ([]CandleFreshness, bool)
+	// TimeframeFreshness returns, per served timeframe, the age of its newest bucket: the only
+	// probe that sees a derived timeframe freeze while the scope looks live.
+	TimeframeFreshness func() ([]TimeframeFreshness, bool)
 	// ConfiguredCoverage returns the configured symbol count per canonical scope.
 	ConfiguredCoverage func() (map[string]int, bool)
 	// ColdWrite reports the age of the last successful durable-tier commit.
@@ -176,13 +201,14 @@ type Report struct {
 	Uptime     string
 	Goroutines int
 
-	Connections       []ConnectionSummary
-	DerivativesPoller bool
-	TimeframeChecksum string
-	MissingScopes     []string
-	StaleScopes       []string
-	CandleFreshness   []CandleFreshnessReport
-	CoverageDeficits  []string
+	Connections        []ConnectionSummary
+	DerivativesPoller  bool
+	TimeframeChecksum  string
+	MissingScopes      []string
+	StaleScopes        []string
+	CandleFreshness    []CandleFreshnessReport
+	TimeframeFreshness []TimeframeFreshnessReport
+	CoverageDeficits   []string
 
 	ColdWriteAgeSeconds *int64
 	ColdWriteStale      bool
@@ -371,6 +397,53 @@ func (a *Aggregator) Evaluate() Report {
 		}
 	}
 
+	// ── Timeframe freshness ───────────────────────────────────────────────
+	//
+	// DEGRADES, never 503. A frozen derived timeframe means the served candles for it are stale,
+	// which is an integrity problem worth alarming on; it does not mean the transport is down, and
+	// restarting the process to fix it would destroy the rings without repairing the fold.
+	var timeframeFreshness []TimeframeFreshnessReport
+	frozenTimeframes := 0
+	if a.probes.TimeframeFreshness != nil {
+		rows, configured := a.probes.TimeframeFreshness()
+		if configured {
+			timeframeFreshness = make([]TimeframeFreshnessReport, 0, len(rows))
+			for _, row := range rows {
+				detail := TimeframeFreshnessReport{
+					Scope:        row.Scope,
+					Timeframe:    row.Timeframe,
+					NewestAgoMs:  row.NewestAgeMs,
+					StaleAfterMs: row.StaleAfterMs,
+				}
+				detail.Stale = row.HaveData && row.StaleAfterMs > 0 && row.NewestAgeMs > row.StaleAfterMs
+				if detail.Stale {
+					frozenTimeframes++
+				}
+				timeframeFreshness = append(timeframeFreshness, detail)
+			}
+			sort.Slice(timeframeFreshness, func(i, j int) bool {
+				if timeframeFreshness[i].Scope != timeframeFreshness[j].Scope {
+					return timeframeFreshness[i].Scope < timeframeFreshness[j].Scope
+				}
+				return timeframeFreshness[i].Timeframe < timeframeFreshness[j].Timeframe
+			})
+		}
+	}
+	if timeframeFreshness != nil {
+		if frozenTimeframes > 0 {
+			components = append(components, ComponentReport{
+				Name:   componentTimeframeFreshness,
+				State:  ComponentDegraded,
+				Reason: fmt.Sprintf("%d frozen timeframe(s)", frozenTimeframes),
+			})
+			if status == statusHealthy {
+				status = statusDegraded
+			}
+		} else {
+			components = append(components, ComponentReport{Name: componentTimeframeFreshness, State: ComponentOK})
+		}
+	}
+
 	// ── Feed producer ─────────────────────────────────────────────────────
 	// This component never turns the probe into 503: a live feed whose frames stopped is
 	// degraded because a readable candle is still being served, and restarting would
@@ -525,6 +598,7 @@ func (a *Aggregator) Evaluate() Report {
 		MissingScopes:       missingScopes,
 		StaleScopes:         staleScopes,
 		CandleFreshness:     candleFreshness,
+		TimeframeFreshness:  timeframeFreshness,
 		CoverageDeficits:    deficits,
 		ColdWriteAgeSeconds: coldAge,
 		ColdWriteStale:      coldStale,

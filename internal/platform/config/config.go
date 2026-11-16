@@ -461,16 +461,17 @@ func Validate(cfg Config) error {
 	if cfg.LogFormat != "" && cfg.LogFormat != "text" && cfg.LogFormat != "json" {
 		return fmt.Errorf("server.log_format must be text or json, got %q", cfg.LogFormat)
 	}
-	if !cfg.RealtimeWSAuthDisabled {
-		ticketSet := cfg.RealtimeWSTicketSecret != ""
-		mintSet := cfg.RealtimeWSMintToken != ""
-		if ticketSet || mintSet {
-			if !ticketSet || !mintSet {
-				return fmt.Errorf("the WebSocket edge requires BOTH GOWHALE_REALTIME_WS_TICKET_SECRET and GOWHALE_REALTIME_WS_MINT_TOKEN; set GOWHALE_REALTIME_WS_AUTH_DISABLED=true only for local use")
-			}
-			if err := validateWSSecret("GOWHALE_REALTIME_WS_TICKET_SECRET", cfg.RealtimeWSTicketSecret); err != nil {
-				return err
-			}
+	if !cfg.RealtimeWSAuthDisabled && cfg.RealtimeWSTicketSecret != "" {
+		// TICKET_SECRET is what this edge needs: it signs the tickets the browser presents on the
+		// handshake, and every deployment that serves the chart edge has one.
+		if err := validateWSSecret("GOWHALE_REALTIME_WS_TICKET_SECRET", cfg.RealtimeWSTicketSecret); err != nil {
+			return err
+		}
+		// MINT_TOKEN belongs to a DIFFERENT hop: a gateway that mints tickets on the server's
+		// behalf. Where the edge mints its own at /api/ws-ticket — behind the gateway's JWT
+		// auth_request — the token is absent, and demanding it refused to boot an edge that was
+		// working. When it IS configured it must be valid, and the endpoint enforces it.
+		if cfg.RealtimeWSMintToken != "" {
 			if err := validateWSSecret("GOWHALE_REALTIME_WS_MINT_TOKEN", cfg.RealtimeWSMintToken); err != nil {
 				return err
 			}

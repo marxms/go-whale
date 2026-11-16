@@ -259,6 +259,15 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	delay := a.klineBackoffPolicy().Delay(a.klineFailures, rand.Float64())
 	a.klineFailures++
 	a.klineNextAttempt = now.Add(delay)
+
+	// Partition-scoped recovery first: when one partition is silent and a sister is delivering, the
+	// fault is the partition's, and restarting the fleet would close the healthy sister and mark
+	// symbols that never lost their producer.
+	if scoped, ok := feed.(partitionScopedKlineFeed); ok && !restartNeeded && len(a.klinePendingAttach) == 0 {
+		if stat, members, found := scoped.SilentPartition(binancesdk.KlineSilenceLimitSeconds); found {
+			return a.restartKlinePartition(ctx, exchangeID, marketType, scoped, stat, members)
+		}
+	}
 	switch {
 	case restartNeeded || len(a.klinePendingAttach) > 0:
 		a.logger().Error("kline feed: transport recovery required; restarting despite recent frames",
@@ -279,8 +288,12 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 
 	// Mark before Start can close the holed bucket with a frame from the next bucket.
 	if a.candleEngine != nil {
-		if marked := a.candleEngine.MarkOpenBucketGapped(exchangeID, marketType, binancesdk.KlineFeedInterval, fleet); marked > 0 {
-			a.logger().Warn("kline feed: open buckets marked incomplete across the restart hole", "buckets", marked)
+		marked := a.candleEngine.MarkOpenBucketGapped(exchangeID, marketType, binancesdk.KlineFeedInterval, fleet)
+		if len(marked) > 0 {
+			a.logger().Warn("kline feed: open buckets marked incomplete across the restart hole", "buckets", len(marked))
+			// The mark is applied under the engine lock, so the rebuild has to happen outside it.
+			// A closed parent receives no future frame to trigger the fold on its own.
+			a.candleEngine.RepairAncestors(exchangeID, marketType, binancesdk.KlineFeedInterval, marked)
 		}
 	}
 	a.reserveKlineGapHeads(ctx, exchangeID, marketType, fleet)
@@ -327,6 +340,53 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	}
 	a.klineGapHeads = nil
 	return false
+}
+
+// partitionScopedKlineFeed is the optional capability a feed may offer; a test fake need not.
+type partitionScopedKlineFeed interface {
+	SilentPartition(float64) (binancesdk.PartitionStat, []string, bool)
+	RestartPartition(int) error
+}
+
+// restartKlinePartition heals one silent partition without touching the fleet. The mark is scoped
+// to that partition's members: they are the only symbols whose producer disappeared.
+func (a *App) restartKlinePartition(
+	ctx context.Context,
+	exchangeID, marketType string,
+	scoped partitionScopedKlineFeed,
+	stat binancesdk.PartitionStat,
+	members []string,
+) bool {
+	a.logger().Error("kline feed: one partition is not delivering; restarting ONLY that partition",
+		"partition", stat.ID,
+		"symbols", len(members),
+		"silent_seconds", stat.LastFrameAge.Seconds(),
+		"exchange", exchangeID,
+		"market_type", marketType)
+
+	// Mark before the redial can close the holed bucket with a frame from the next bucket.
+	if a.candleEngine != nil {
+		marked := a.candleEngine.MarkOpenBucketGapped(exchangeID, marketType, binancesdk.KlineFeedInterval, members)
+		if len(marked) > 0 {
+			a.logger().Warn("kline feed: open buckets marked incomplete across the partition restart hole",
+				"buckets", len(marked), "partition", stat.ID)
+			// The mark is applied under the engine lock, so the rebuild happens outside it.
+			a.candleEngine.RepairAncestors(exchangeID, marketType, binancesdk.KlineFeedInterval, marked)
+		}
+	}
+	// Heads stay complete for the whole fleet; only the affected members are enqueued below, so a
+	// sister's pending heads are not dropped by this repair.
+	a.reserveKlineGapHeads(ctx, exchangeID, marketType, a.klineSymbols)
+
+	if err := scoped.RestartPartition(stat.ID); err != nil {
+		a.logger().Error("kline feed: partition restart failed; the scope keeps its other partitions",
+			"partition", stat.ID, "error", err)
+		return a.streamCtx != nil && a.streamCtx.Err() != nil
+	}
+	if a.gapRecovery != nil {
+		recovery.EnqueueBootGap(ctx, a.gapRecovery, a.klineGapHeads, exchangeID, marketType, members, time.Now())
+	}
+	return a.streamCtx != nil && a.streamCtx.Err() != nil
 }
 
 // extendKlineFeed brings symbols found by periodic discovery under the venue's ownership.

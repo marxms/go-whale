@@ -72,7 +72,7 @@ func MergeCandleValues(stored, incoming Candle, total bool) Candle {
 		}
 		merged := incoming
 		merged.CreatedAt = stored.CreatedAt
-		merged.HasGap = stored.HasGap || incoming.HasGap
+		merged.HasGap, merged.GapKind = MergeGapMark(stored, incoming)
 		merged.SideUnknownCount = stored.SideUnknownCount
 		merged.LateTradeCount = stored.LateTradeCount
 		return merged
@@ -125,7 +125,7 @@ func MergeCandleValues(stored, incoming Candle, total bool) Candle {
 	if incoming.Close != 0 {
 		merged.Close = incoming.Close
 	}
-	merged.HasGap = stored.HasGap || incoming.HasGap
+	merged.HasGap, merged.GapKind = MergeGapMark(stored, incoming)
 	// THE LABEL IS NOT TRANSFERABLE. Copying incoming.Source blindly would let a REST total that
 	// won on magnitude inherit the ws_kline credential from the bucket it overwrote, and
 	// VenueHasSpoken would then defend the wrong number as if the venue had stated it.
@@ -187,7 +187,9 @@ func MergeOpenVenueFrame(stored, incoming Candle, now int64) (Candle, bool) {
 	// OUR OWN MARKS SURVIVE. They describe this process's treatment of the bucket, not the
 	// market, so the venue has nothing to say about them and replacing them with its silence
 	// would erase the only evidence the repair path reads.
-	merged.HasGap = stored.HasGap || incoming.HasGap
+	// The venue's frame says nothing about WHY we marked the bucket, so the stored cause survives;
+	// an incoming cause of its own is kept only when it promises less.
+	merged.HasGap, merged.GapKind = MergeGapMark(stored, incoming)
 	merged.SideUnknownCount = stored.SideUnknownCount
 	merged.LateTradeCount = stored.LateTradeCount
 	return merged, true
@@ -213,7 +215,7 @@ func DeltaInsideTotalHorizon(stored, incoming Candle) bool {
 // silence its own repair, and SideUnknownCount is the only evidence that volume was seen with no
 // attributable side.
 func MergeDroppedDeltaMarks(stored, incoming Candle, now int64) Candle {
-	stored.HasGap = stored.HasGap || incoming.HasGap
+	stored.HasGap, stored.GapKind = MergeGapMark(stored, incoming)
 	stored.SideUnknownCount += incoming.SideUnknownCount
 	stored.LastUpdate = now
 	return stored
@@ -283,6 +285,7 @@ func MergeOpenDelta(stored, incoming Candle, now int64, supersede, declaredTotal
 	if incoming.Source != "" {
 		sourceMerged = incoming.Source
 	}
+	hasGap, gapKind := MergeGapMark(stored, incoming)
 
 	return Candle{
 		Timestamp:        incoming.Timestamp,
@@ -299,7 +302,8 @@ func MergeOpenDelta(stored, incoming Candle, now int64, supersede, declaredTotal
 		Source:           sourceMerged,
 		AggregateMethod:  incoming.AggregateMethod,
 		LateTradeCount:   stored.LateTradeCount + incoming.LateTradeCount,
-		HasGap:           stored.HasGap || incoming.HasGap,
+		HasGap:           hasGap,
+		GapKind:          gapKind,
 
 		// THE TWO CLOCKS, CARRIED FORWARD. Without them the bucket forgets how far the exchange
 		// total it already absorbed reached, so the NEXT delta cannot be judged against it and is
@@ -336,6 +340,8 @@ func MergeOpenSnapshot(stored, incoming Candle, now int64) Candle {
 		}
 	}
 
+	hasGap, gapKind := MergeGapMark(stored, incoming)
+
 	return Candle{
 		Timestamp:        incoming.Timestamp,
 		Open:             FirstNonZero(incoming.Open, stored.Open),
@@ -349,7 +355,8 @@ func MergeOpenSnapshot(stored, incoming Candle, now int64) Candle {
 		TakerSellVolume:  takerSellVolume,
 		SideUnknownCount: MaxInt64(stored.SideUnknownCount, incoming.SideUnknownCount),
 		LateTradeCount:   MaxInt64(stored.LateTradeCount, incoming.LateTradeCount),
-		HasGap:           stored.HasGap || incoming.HasGap,
+		HasGap:           hasGap,
+		GapKind:          gapKind,
 		AggregateMethod:  FirstNonEmpty(incoming.AggregateMethod, stored.AggregateMethod),
 		Source:           FirstNonEmpty(incoming.Source, stored.Source),
 

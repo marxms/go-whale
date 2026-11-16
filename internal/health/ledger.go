@@ -14,6 +14,7 @@ package health
 
 import (
 	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 )
@@ -58,6 +59,24 @@ func (l *Ledger) Assign(symbol string, partitionID int) {
 		partitionID = math.MaxInt32
 	}
 	l.get(symbol).partitionID.Store(int32(partitionID))
+}
+
+// SymbolsForPartition returns the symbols assigned to one partition, sorted so a redial is
+// deterministic.
+//
+// It is the membership authority for a partition-scoped reconnect. The ledger is written on the
+// combined dial AND on a dynamic Subscribe (which attaches to partition 0), so it sees every path
+// that changes ownership — which a snapshot taken at dial time does not.
+func (l *Ledger) SymbolsForPartition(partitionID int) []string {
+	out := make([]string, 0, 32)
+	l.entries.Range(func(key, value any) bool {
+		if int(value.(*entry).partitionID.Load()) == partitionID {
+			out = append(out, key.(string))
+		}
+		return true
+	})
+	sort.Strings(out)
+	return out
 }
 
 // LastSeen returns the last-seen wall-clock ms for symbol (0,false if unknown).

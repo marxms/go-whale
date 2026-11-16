@@ -206,7 +206,9 @@ func (a *App) autoSubscribe(ctx context.Context) {
 				if a.candleEngine != nil {
 					marked := 0
 					for _, tf := range candle.BootGapMarkTimeframes(binancesdk.KlineFeedInterval, a.cfg.CandleEngine.Timeframes) {
-						marked += a.candleEngine.MarkOpenBucketGapped(exCfg.ID, string(marketType), tf, symbols)
+						marks := a.candleEngine.MarkOpenBucketGapped(exCfg.ID, string(marketType), tf, symbols)
+						marked += len(marks)
+						a.candleEngine.RepairAncestors(exCfg.ID, string(marketType), tf, marks)
 					}
 					if marked > 0 {
 						a.logger().Warn("boot gap: open buckets marked incomplete", "buckets", marked, "exchange", exCfg.ID, "market_type", exCfg.MarketType)

@@ -42,6 +42,7 @@ const (
 	labelReason     = "reason"
 	labelSymbol     = "symbol"
 	labelOutcome    = "outcome"
+	labelViolation  = "violation"
 	labelTimeframe  = "timeframe"
 	labelFeed       = "feed"
 	labelMarket     = "market"
@@ -448,6 +449,10 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Name: "cold_append_aborted_total",
 		Help: "Seed/backfill cold-tier appends aborted mid-batch (ctx-cancel / pipeline shutdown), leaving post-abort candles unwritten to cold. The batch error is surfaced for retry.",
 	})
+	sanityViolation := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "candle_sanity_violation_total",
+		Help: "Folded candles that contradicted their own children, by violation. violation=ohlc_order (high<low, or open/close outside the range), violation=high_below_children, violation=low_above_children, violation=volume_mismatch (a bucket declaring itself complete is not the sum of its children). The bar is still published, marked provisional: refusing the write would re-freeze the bucket, which is the defect this check surfaces.",
+	}, []string{labelExchange, labelMarketType, labelTimeframe, labelViolation})
 
 	p.engine = engine.Metrics{
 		WarmSeedTotal:                 func(ex, mt, tf, outcome string) { warmSeed.WithLabelValues(ex, mt, tf, outcome).Inc() },
@@ -461,6 +466,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		SeedRepairEvicted:             func() { seedRepairEvicted.Inc() },
 		SeedRepairOutsideRetention:    func() { seedRepairOutsideRetention.Inc() },
 		ColdAppendAborted:             func() { coldAppendAborted.Inc() },
+		CandleSanityViolationTotal:    func(ex, mt, tf, violation string) { sanityViolation.WithLabelValues(ex, mt, tf, violation).Inc() },
 		ColdMissingBuckets:            func(ex, mt, tf string, v float64) { coldMissingBuckets.WithLabelValues(ex, mt, tf).Set(v) },
 		ColdSymbolsWithGaps:           func(ex, mt, tf string, v float64) { coldSymbolsWithGaps.WithLabelValues(ex, mt, tf).Set(v) },
 		ColdSymbolsExpected:           func(ex, mt, tf string, v float64) { coldSymbolsExpected.WithLabelValues(ex, mt, tf).Set(v) },
@@ -746,7 +752,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		durableMissingBuckets, durableColumnCovered, durableTimeframeCovered,
 		durableIncoherentFunding, durableDimensionsMeasured, foldSeedRevisions,
 		lateUpdate, seedMerge, seedRepairEvicted, seedRepairOutsideRetention,
-		coldAppendAborted,
+		coldAppendAborted, sanityViolation,
 		// ── Derivatives collector ─────────────────────────────────────────
 		feedAvailable, feedRequest, collectedPoints, collectedSpan, historyPages,
 		fundingIntervalComparison, fundingIntervalMeasurement, fundingProfileEntries,

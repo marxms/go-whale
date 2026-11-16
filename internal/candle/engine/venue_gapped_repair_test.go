@@ -46,8 +46,8 @@ func TestGappedVenueBucketAcceptsARepair(t *testing.T) {
 	}
 
 	// Once the restart admits the bucket is incomplete, the repair must be allowed to land.
-	if n := ce.MarkOpenBucketGapped(ex, mt, tf, []string{sym}); n != 1 {
-		t.Fatalf("MarkOpenBucketGapped marked %d buckets, want 1", n)
+	if n := ce.MarkOpenBucketGapped(ex, mt, tf, []string{sym}); len(n) != 1 {
+		t.Fatalf("MarkOpenBucketGapped marked %d buckets, want 1", len(n))
 	}
 	stored = *ce.GetCandleByTimestamp(ex, mt, sym, tf, ts)
 	if !stored.HasGap {
