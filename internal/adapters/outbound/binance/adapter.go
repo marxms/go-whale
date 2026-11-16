@@ -74,8 +74,11 @@ type SDKClient struct {
 	// Reconnection
 	reconnectCount atomic.Uint64
 	reconnecting   atomic.Bool
-	reconnectMu    sync.Mutex  // protects re-subscription
-	reconnectCh    chan string // buffered(1); signals the reconnect worker (deduped)
+	reconnectMu    sync.Mutex // protects re-subscription
+	// buffered(1), deduped. The request carries the PARTITION: an error on one combined-URL
+	// socket used to be routed as a string and lost its identity, so the handler closed both
+	// partitions for one partition's fault.
+	reconnectCh chan reconnectRequest
 
 	// State
 	connected     atomic.Bool
@@ -149,7 +152,7 @@ func NewSDKClient(config streaming.ClientConfig, logs ...*slog.Logger) *SDKClien
 		combinedURLConnectEnabled: true,
 		livenessLedgerEnabled:     true,
 		netdiag:                   netdiag.New(),
-		reconnectCh:               make(chan string, 1),
+		reconnectCh:               make(chan reconnectRequest, 1),
 		ctx:                       ctx,
 		cancel:                    cancel,
 		pacer:                     newSubscribePacer(subscribeMinInterval),
@@ -179,10 +182,17 @@ func (c *SDKClient) SetMetrics(m Metrics) {
 // panicking on the nil interface.
 func (c *SDKClient) closed() bool { return c.ctx != nil && c.ctx.Err() != nil }
 
+// reconnectRequest names WHAT failed. A partition-scoped request heals one socket; a fleet request
+// (-1) rebuilds everything, and is the fallback whenever the scope cannot be honoured.
+type reconnectRequest struct {
+	partition int
+	reason    string
+}
+
 // requestReconnect signals the reconnect worker without blocking (deduped by the buffered channel).
-func (c *SDKClient) requestReconnect(reason string) {
+func (c *SDKClient) requestReconnect(partition int, reason string) {
 	select {
-	case c.reconnectCh <- reason:
+	case c.reconnectCh <- reconnectRequest{partition: partition, reason: reason}:
 	default:
 		// A reconnect is already queued/running — the signal was dropped.
 		// Surface it as a metric so reconnect churn is observable.
@@ -197,8 +207,8 @@ func (c *SDKClient) reconnectWorker() {
 		select {
 		case <-c.ctx.Done():
 			return
-		case reason := <-c.reconnectCh:
-			c.reconnectAndResubscribe(reason)
+		case req := <-c.reconnectCh:
+			c.reconnectAndResubscribe(req)
 		}
 	}
 }
@@ -411,7 +421,7 @@ func (c *SDKClient) checkPartitionLiveness() {
 		"stale_symbols", deadStat.Stale,
 		"total_symbols", deadStat.Total,
 		"stale_fraction", deadStat.StaleFraction())
-	c.requestReconnect(fmt.Sprintf("partition %d liveness stall (%d/%d stale)", deadPid, deadStat.Stale, deadStat.Total))
+	c.requestReconnect(deadPid, fmt.Sprintf("liveness stall (%d/%d stale)", deadStat.Stale, deadStat.Total))
 }
 
 // resubscribeVerifyWindow is how long after a resubscribe to wait before checking
@@ -778,7 +788,7 @@ func (c *SDKClient) startConnectionMonitor(connCtx context.Context) {
 		reconnecting:     &c.reconnecting,
 		connected:        &c.connected,
 		metrics:          c.metrics,
-		requestReconnect: c.requestReconnect,
+		requestReconnect: func(reason string) { c.requestReconnect(-1, reason) },
 		shutdownLog:      "binance sdk connection monitor shutting down",
 		disconnectedLog:  "binance sdk: connection monitor detects disconnected state",
 		stalledLog:       "binance sdk: no messages received",
@@ -799,6 +809,74 @@ func recordResubscribeOutcome(metrics Metrics, market string, total, resubscribe
 		log.Warn("binance sdk: resubscribe incomplete; symbols not restored after reconnect",
 			"missing", incomplete, "symbols", total, "market_type", market)
 	}
+}
+
+// reconnectOnePartition closes and re-dials ONE combined-URL partition.
+//
+// A partition-0 socket error used to close partitions 0 and 1, resetting the healthy sister's
+// connection, counters and ledger assignment for a fault that was not hers. The membership comes
+// from the ledger, which is written on the combined dial and on
+// every dynamic Subscribe — the only structure that sees all ownership changes.
+//
+// The caller holds reconnectMu and has set reconnecting, so this cannot race a fleet rebuild.
+func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
+	symbols := c.ledger.SymbolsForPartition(pid)
+	if len(symbols) == 0 {
+		return false
+	}
+
+	c.connectMu.Lock()
+	if pid < 0 || pid >= len(c.partitions) || c.partitions[pid] == nil {
+		c.connectMu.Unlock()
+		return false
+	}
+	victim := c.partitions[pid]
+	connCtx := c.connCtx
+	c.connectMu.Unlock()
+
+	logger.OrDiscard(c.log).Warn("binance sdk: reconnecting ONE partition",
+		"partition", pid, "symbols", len(symbols), "reason", reason)
+	if err := victim.Close(); err != nil {
+		logger.OrDiscard(c.log).Warn("binance sdk: closing the failed partition",
+			"partition", pid, "error", err)
+	}
+
+	conn := c.newFuturesWS(pid)
+	handlers := make(map[string]binancews.Handler, len(symbols))
+	for _, symbol := range symbols {
+		c.ledger.Assign(symbol, pid)
+		handlers[streamName(symbol)] = c.tradeCallback(symbol)
+	}
+	if err := connectMarketStream(c.ctx, c.ctx, conn, handlers); err != nil {
+		// The partition is gone and its symbols have no producer. The caller falls back to the
+		// fleet path, which is the only remaining way to restore them.
+		logger.OrDiscard(c.log).Error("binance sdk: partition redial failed; falling back to the fleet",
+			"partition", pid, "error", err)
+		NewSDKEvent(EventReconnectFailed, venueBinance, marketTypeFuture, c.log).
+			WithReason("partition_redial_failed").
+			Log()
+		return false
+	}
+
+	c.connectMu.Lock()
+	c.partitions[pid] = conn
+	if pid == 0 {
+		c.wsConn = conn
+	}
+	c.connectMu.Unlock()
+
+	// The replacement needs its own terminal-error watcher under the CURRENT connection context:
+	// cancelling that context would take the sister down too, which is the defect being removed.
+	if connCtx != nil && connCtx.Err() == nil {
+		c.connWg.Add(1)
+		go func() {
+			defer c.connWg.Done()
+			watchTransportError(connCtx, pid, conn, marketTypeFuture, c.metrics, c.netdiag,
+				func(reason string) { c.requestReconnect(pid, reason) }, c.log)
+		}()
+	}
+	c.triggerGapRecovery(symbols)
+	return true
 }
 
 // closeAllConnections closes every live WebSocket connection: all combined-URL
@@ -848,7 +926,8 @@ func (c *SDKClient) reconnectDial(symbols []string) (int, error) {
 // On the empty-connect path the Binance SDK v2 does NOT resubscribe to market streams after
 // reconnect, so this closes everything, reconnects, and re-subscribes all tracked symbols.
 // On the combined-URL path the server subscribes on the handshake (frame-free).
-func (c *SDKClient) reconnectAndResubscribe(reason string) {
+func (c *SDKClient) reconnectAndResubscribe(req reconnectRequest) {
+	reason := req.reason
 	if c.reconnecting.Load() {
 		// Warn so the skip is visible under log_level=warn.
 		logger.OrDiscard(c.log).Warn("binance sdk: reconnect already in progress; skipping")
@@ -873,6 +952,13 @@ func (c *SDKClient) reconnectAndResubscribe(reason string) {
 			Log()
 		return
 	default:
+	}
+
+	// A partition-scoped request is honoured only when the partition and its members are known.
+	// Otherwise the fleet path runs, because redialing a partition with the wrong symbol list is
+	// worse than rebuilding everything.
+	if req.partition >= 0 && c.reconnectOnePartition(req.partition, reason) {
+		return
 	}
 
 	c.symbolsMu.RLock()

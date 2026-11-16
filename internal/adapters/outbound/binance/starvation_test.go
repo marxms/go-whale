@@ -39,7 +39,7 @@ func staleAllPartitions(c *SDKClient, partitions, perPartition int, ageMs int64)
 // stale AND the process was just descheduled, the staleness is CPU starvation, not
 // stream death — the reconnect must be suppressed (don't storm a starved box, O4).
 func TestStarvationInterlockSuppressesAllStaleReconnect(t *testing.T) {
-	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan string, 1), heartbeat: &starvationHeartbeat{}}
+	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan reconnectRequest, 1), heartbeat: &starvationHeartbeat{}}
 	staleAllPartitions(c, 2, 6, livenessStaleThresholdMs+10_000)
 	c.heartbeat.markStarved(time.Now().UnixMilli())
 
@@ -56,7 +56,7 @@ func TestStarvationInterlockSuppressesAllStaleReconnect(t *testing.T) {
 // proves the process IS scheduled, so a dead partition is genuine and reconnects
 // even while the starvation flag is set.
 func TestStarvationInterlockReconnectsWithFreshSibling(t *testing.T) {
-	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan string, 1), heartbeat: &starvationHeartbeat{}}
+	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan reconnectRequest, 1), heartbeat: &starvationHeartbeat{}}
 	now := time.Now().UnixMilli()
 	for i := 0; i < 6; i++ {
 		s := fmt.Sprintf("D%d", i)
@@ -82,7 +82,7 @@ func TestStarvationInterlockReconnectsWithFreshSibling(t *testing.T) {
 // TestStarvationInterlockReconnectsAllStaleWhenNotStarved: all partitions dead with
 // a scheduled process (e.g. a real network drop) is genuine — reconnect.
 func TestStarvationInterlockReconnectsAllStaleWhenNotStarved(t *testing.T) {
-	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan string, 1), heartbeat: &starvationHeartbeat{}}
+	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan reconnectRequest, 1), heartbeat: &starvationHeartbeat{}}
 	staleAllPartitions(c, 2, 6, livenessStaleThresholdMs+10_000)
 
 	c.checkPartitionLiveness()

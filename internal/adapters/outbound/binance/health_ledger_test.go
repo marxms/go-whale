@@ -29,7 +29,7 @@ func TestGetHealthStateDegradesOnDeadPartition(t *testing.T) {
 // TestCheckPartitionLivenessPublishesDeadPartitionFlag proves the watchdog publishes
 // the dead-partition flag that GetHealthState reads, and clears it on recovery.
 func TestCheckPartitionLivenessPublishesDeadPartitionFlag(t *testing.T) {
-	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan string, 1), heartbeat: &starvationHeartbeat{}}
+	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, ledger: health.New(), reconnectCh: make(chan reconnectRequest, 1), heartbeat: &starvationHeartbeat{}}
 	now := time.Now().UnixMilli()
 	for i := 0; i < 6; i++ {
 		s := fmt.Sprintf("D%d", i)

@@ -15,13 +15,15 @@ import (
 func TestTransportFaultsEscalateAfterThree(t *testing.T) {
 	feed := NewKlineFeed(context.Background(), "binance", "future", "5m", func(string, candle.Candle) {})
 	defer feed.Stop()
+	partition := fabricatedPartition(0, time.Second, "AAA/USDT")
+	feed.parts = []*klinePartition{partition}
 
-	feed.transportFaults.Add(1)
-	feed.transportFaults.Add(1)
+	partition.faults.Add(1)
+	partition.faults.Add(1)
 	if feed.NeedsRestart() {
 		t.Fatal("two consecutive faults must not restart the feed")
 	}
-	feed.transportFaults.Add(1)
+	partition.faults.Add(1)
 	if !feed.NeedsRestart() {
 		t.Fatal("three consecutive faults must restart the feed")
 	}
@@ -30,14 +32,36 @@ func TestTransportFaultsEscalateAfterThree(t *testing.T) {
 func TestFrameResetsFaults(t *testing.T) {
 	feed := NewKlineFeed(context.Background(), "binance", "future", "5m", func(string, candle.Candle) {})
 	defer feed.Stop()
+	partition := fabricatedPartition(0, time.Second, "AAA/USDT")
+	feed.parts = []*klinePartition{partition}
 
-	feed.transportFaults.Store(2)
-	feed.noteFrame()
-	if got := feed.transportFaults.Load(); got != 0 {
+	partition.faults.Store(2)
+	feed.noteFrame(partition)
+	if got := partition.faults.Load(); got != 0 {
 		t.Fatalf("faults after a frame = %d, want 0", got)
 	}
 	if feed.NeedsRestart() {
 		t.Fatal("a delivered frame must clear the restart verdict")
+	}
+}
+
+// The defect this kills: with one feed-global counter, a healthy sister's frame every few
+// milliseconds reset the dead partition's count, so a partition retrying forever never escalated.
+func TestASisterFrameDoesNotClearAPartitionFaults(t *testing.T) {
+	feed := NewKlineFeed(context.Background(), "binance", "future", "5m", func(string, candle.Candle) {})
+	defer feed.Stop()
+	dead := fabricatedPartition(0, time.Second, "DEAD/USDT")
+	sister := fabricatedPartition(1, time.Second, "LIVE/USDT")
+	feed.parts = []*klinePartition{dead, sister}
+
+	dead.faults.Store(3)
+	feed.noteFrame(sister)
+
+	if got := dead.faults.Load(); got != 3 {
+		t.Fatalf("dead partition faults = %d after a sister frame, want 3", got)
+	}
+	if !feed.NeedsRestart() {
+		t.Fatal("a partition past the fault threshold must still request a restart")
 	}
 }
 
@@ -77,7 +101,7 @@ func TestZeroFramesIsConfigFailure(t *testing.T) {
 	if !feed.ConfigFault(now) {
 		t.Fatal("past the first-frame deadline with zero frames must be a config failure")
 	}
-	feed.noteFrame()
+	feed.noteFrame(&klinePartition{})
 	if feed.ConfigFault(now) {
 		t.Fatal("a delivered frame clears the config fault")
 	}
@@ -94,7 +118,16 @@ func TestTransportErrorIncrementsFaults(t *testing.T) {
 	}
 	defer feed.Stop()
 
-	if !waitFor(t, 2*time.Second, func() bool { return feed.transportFaults.Load() >= 1 }) {
-		t.Fatal("a real transport error did not increment the consecutive-fault counter")
+	if !waitFor(t, 2*time.Second, func() bool {
+		feed.mu.Lock()
+		defer feed.mu.Unlock()
+		for _, partition := range feed.parts {
+			if partition.faults.Load() >= 1 {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("a real transport error did not increment the partition's consecutive-fault counter")
 	}
 }

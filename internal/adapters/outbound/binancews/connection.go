@@ -39,6 +39,23 @@ var (
 	ErrHandlerRequired = errors.New("binancews: handler required")
 )
 
+// WHO closed the socket decides what the close MEANS. A renewal or an explicit shutdown is ours;
+// counting either as an exchange fault is how "the exchange failed" gets asserted without proof.
+const (
+	InitiatorRemote        = "remote"
+	InitiatorLocalShutdown = "local_shutdown"
+	InitiatorLocalRenewal  = "local_renewal"
+)
+
+// CloseEvidence is what the transport retained about why a connection ended. Code is zero when the
+// peer never sent a close frame — which is itself the fact worth recording: 1006 is synthesized
+// locally and proves nothing about the venue.
+type CloseEvidence struct {
+	Code      int
+	Reason    string
+	Initiator string
+}
+
 // Handler receives the `data` object of one combined-stream frame. It runs on
 // the connection's single reader goroutine; handlers must not block on another
 // frame or call Close on their own connection.
@@ -97,6 +114,14 @@ type Connection struct {
 	done  chan struct{}
 	errCh chan error
 	wg    sync.WaitGroup
+
+	// The evidence survives the close: nothing retained it before, and the terminal error was
+	// dropped when the channel was full, so a 1006 could not be attributed.
+	evidenceMu sync.Mutex
+	evidence   CloseEvidence
+	lastErrMu  sync.Mutex
+	lastErr    error
+	dropped    atomic.Int64
 }
 
 // Option adjusts a connection before it dials.
@@ -328,7 +353,7 @@ func (c *Connection) readLoop() {
 	for {
 		_, payload, err := c.conn.ReadMessage()
 		if err != nil {
-			c.stop(fmt.Errorf("binancews: read: %w", err))
+			c.stopWith(InitiatorRemote, fmt.Errorf("binancews: read: %w", err))
 			return
 		}
 		c.extendReadDeadline(c.conn)
@@ -416,19 +441,63 @@ func (c *Connection) renewalLoop(interval time.Duration) {
 	case <-c.ctx.Done():
 		return
 	case <-timer.C:
-		c.stop(errors.New("binancews: scheduled connection renewal"))
+		c.stopWith(InitiatorLocalRenewal, errors.New("binancews: scheduled connection renewal"))
 	}
 }
 
+// report records the terminal error and hands it to the watcher.
+//
+// The retained copy is not decoration: the channel holds ONE error, and a second one used to be
+// discarded in silence, leaving a reconnect with no cause.
 func (c *Connection) report(err error) {
+	if err == nil {
+		return
+	}
+	c.lastErrMu.Lock()
+	c.lastErr = err
+	c.lastErrMu.Unlock()
 	select {
 	case c.errCh <- err:
 	default:
+		c.dropped.Add(1)
 	}
 }
 
-func (c *Connection) stop(err error) {
+// CloseEvidence reports why the connection ended. Zero before it stops.
+func (c *Connection) CloseEvidence() CloseEvidence {
+	c.evidenceMu.Lock()
+	defer c.evidenceMu.Unlock()
+	return c.evidence
+}
+
+// TerminalError reports the last error the connection produced, retained even when the watcher
+// channel was full.
+func (c *Connection) TerminalError() error {
+	c.lastErrMu.Lock()
+	defer c.lastErrMu.Unlock()
+	return c.lastErr
+}
+
+// DroppedReports counts terminal errors that did not reach the watcher channel.
+func (c *Connection) DroppedReports() int64 { return c.dropped.Load() }
+
+// closeCodeOf extracts the venue's close code, when the error carries one.
+func closeCodeOf(err error) (int, string) {
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return closeErr.Code, closeErr.Text
+	}
+	return 0, ""
+}
+
+// stopWith records the evidence BEFORE closing the socket: the close that follows must not erase
+// the code the venue already sent.
+func (c *Connection) stopWith(initiator string, err error) {
 	c.closeOnce.Do(func() {
+		code, reason := closeCodeOf(err)
+		c.evidenceMu.Lock()
+		c.evidence = CloseEvidence{Code: code, Reason: reason, Initiator: initiator}
+		c.evidenceMu.Unlock()
 		c.connected.Store(false)
 		c.closed.Store(true)
 		c.cancel()
@@ -447,7 +516,7 @@ func (c *Connection) stop(err error) {
 
 // Close stops the reader and waits for every connection goroutine to exit.
 func (c *Connection) Close() error {
-	c.stop(nil)
+	c.stopWith(InitiatorLocalShutdown, nil)
 	c.wg.Wait()
 	return nil
 }
