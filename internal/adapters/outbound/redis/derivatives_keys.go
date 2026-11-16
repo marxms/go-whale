@@ -138,6 +138,15 @@ func CoinalyzeSeriesKeyPattern() string {
 	return derivCoinalyzeSeriesPrefix + ":*:*:*:*"
 }
 
+// IsCoinalyzeSeriesKey reports whether a concrete key belongs to that same family.
+//
+// The pattern above is what a sweep SCANs; this predicate is what it checks each returned key
+// against. They have to come from the same prefix: a family recognized by one and not the other is
+// exactly how stale keys survive a sweep.
+func IsCoinalyzeSeriesKey(key string) bool {
+	return strings.HasPrefix(key, derivCoinalyzeSeriesPrefix+":")
+}
+
 // DerivativesKeyPatterns returns the globs covering every derivatives key family,
 // for sweeps that walk the whole keyspace without knowing the exchange or market
 // type — today that is the pruner.

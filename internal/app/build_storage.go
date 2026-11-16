@@ -81,10 +81,11 @@ func (a *App) buildStorage(cfg config.Config, tfReg *candle.TimeframeRegistry, m
 		store.Catalog = a.tieredStore
 		store.SeedWriter = a.tieredStore
 
-		// Chart WebSocket edge. Built when BOTH the ticket secret and the gateway mint
-		// token are configured, OR the explicit local escape hatch is set. Otherwise the
-		// edge stays disabled (fail-closed, no idle goroutines).
-		if (cfg.RealtimeWSTicketSecret != "" && cfg.RealtimeWSMintToken != "") || cfg.RealtimeWSAuthDisabled {
+		// Chart WebSocket edge. Built when the ticket secret is configured, OR the explicit local
+		// escape hatch is set. The gateway mint token is NOT part of this decision: it enables a
+		// separate mint endpoint, and demanding it here refused to build an edge whose own
+		// /api/ws-ticket (behind the gateway's JWT) was working.
+		if cfg.RealtimeWSTicketSecret != "" || cfg.RealtimeWSAuthDisabled {
 			if cfg.RealtimeWSAuthDisabled {
 				a.logger().Warn("GOWHALE_REALTIME_WS_AUTH_DISABLED=true; the WS chart edge is open to any origin")
 			}
