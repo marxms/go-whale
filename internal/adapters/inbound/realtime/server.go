@@ -113,11 +113,16 @@ func (s *Server) MintTicket(w http.ResponseWriter, r *http.Request) {
 		}{Ticket: "noauth", ExpiresAt: expiry})
 		return
 	}
-	if len(s.ticketSecret) == 0 || len(s.mintToken) == 0 {
+	if len(s.ticketSecret) == 0 {
 		http.Error(w, "stream auth not configured", http.StatusServiceUnavailable)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Gowhale-Mint-Token")), s.mintToken) != 1 {
+	// The mint token is enforced WHEN CONFIGURED. Without it the endpoint is the one the gateway
+	// exposes behind its own JWT auth_request — the topology this edge runs in, where the browser
+	// calls /api/ws-ticket and nginx has already authenticated the request. A configured token is
+	// still required, so a server-to-gateway deployment keeps its second factor.
+	if len(s.mintToken) > 0 &&
+		subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Gowhale-Mint-Token")), s.mintToken) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
