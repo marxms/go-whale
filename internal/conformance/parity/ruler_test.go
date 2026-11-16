@@ -743,8 +743,11 @@ func parseKlines(raw [][]any) ([]Candle, error) {
 // FetchOurs reads candles from the streamer's own timeseries endpoint — the same contract
 // the analyzer consumes.
 func FetchOurs(client *http.Client, baseURL, symbol, timeframe string, limit int) ([]Candle, error) {
-	u := fmt.Sprintf("%s/api/timeseries/%s/%s?limit=%d",
-		baseURL, url.PathEscape(symbol), url.PathEscape(timeframe), limit)
+	// Query form, which is the route the analyzer actually consumes: the path form this
+	// harness used to build does not exist in the router, so every read came back 404 and
+	// the gate could never grade a pair.
+	u := fmt.Sprintf("%s/api/timeseries?symbol=%s&timeframe=%s&limit=%d",
+		baseURL, url.QueryEscape(symbol), url.QueryEscape(timeframe), limit)
 
 	var resp struct {
 		Data []struct {
