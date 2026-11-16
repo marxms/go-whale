@@ -36,8 +36,11 @@ type MetricsCollector struct {
 	// a probe that otherwise measures transport only. See SetColdWriteFreshness.
 	coldFreshness coldFreshnessHolder
 	gaugeSink     atomic.Value // stores health.GaugeSink
-	aggregator    *health.Aggregator
-	log           *slog.Logger
+	// timeframeFreshness stores func() ([]health.TimeframeFreshness, bool): the only probe that
+	// can see a DERIVED timeframe freeze while the scope-level aggregate looks live.
+	timeframeFreshness atomic.Value
+	aggregator         *health.Aggregator
+	log                *slog.Logger
 }
 
 // fleetLivenessSnapshot is the ONE atomic record the sampler publishes. The failing
@@ -76,6 +79,13 @@ func NewMetricsCollector(hybridManager HybridManagerStats, logs ...*slog.Logger)
 		FeedProducers: func() ([]health.FeedProducerReport, bool) {
 			v, ok := mc.feedProducers.Load().([]health.FeedProducerReport)
 			return v, ok
+		},
+		TimeframeFreshness: func() ([]health.TimeframeFreshness, bool) {
+			probe, _ := mc.timeframeFreshness.Load().(func() ([]health.TimeframeFreshness, bool))
+			if probe == nil {
+				return nil, false
+			}
+			return probe()
 		},
 		ConfiguredCoverage: mc.coverage.Snapshot,
 		ColdWrite:          mc.coldWriteProbe,
@@ -141,6 +151,14 @@ func (mc *MetricsCollector) SetDerivativesPollerFlag(flag *health.PollerHealth) 
 	mc.derivPollerAlive = flag
 }
 
+// SetTimeframeFreshness mounts the per-timeframe data-age probe. The producer must supply the
+// freeze threshold with each row: only it knows how long that interval may legitimately stay open.
+func (mc *MetricsCollector) SetTimeframeFreshness(probe func() ([]health.TimeframeFreshness, bool)) {
+	if probe != nil {
+		mc.timeframeFreshness.Store(probe)
+	}
+}
+
 // SetTimeframeRegistry sets the timeframe registry for health checksum.
 func (mc *MetricsCollector) SetTimeframeRegistry(tfReg *candle.TimeframeRegistry) {
 	mc.tfReg = tfReg
@@ -198,6 +216,9 @@ type HealthResponse struct {
 	// monitored symbols and stale symbols. Additive; every field above keeps its name,
 	// shape and omitempty behavior.
 	CandleFreshness []health.CandleFreshnessReport `json:"candle_freshness,omitempty"`
+	// TimeframeFreshness is the per-TIMEFRAME data age. candle_freshness aggregates by scope, so a
+	// derived timeframe can freeze under a live 5m without moving it.
+	TimeframeFreshness []health.TimeframeFreshnessReport `json:"timeframe_freshness,omitempty"`
 
 	// ColdWriteAgeSeconds is the age of the last successful commit to the durable tier.
 	// Every other field on this response answers "is data arriving?"; this one answers "is it
@@ -262,6 +283,7 @@ func (mc *MetricsCollector) Health(w http.ResponseWriter, _ *http.Request) {
 		MissingScopes:       report.MissingScopes,
 		StaleScopes:         report.StaleScopes,
 		CandleFreshness:     report.CandleFreshness,
+		TimeframeFreshness:  report.TimeframeFreshness,
 		CoverageDeficits:    report.CoverageDeficits,
 		ColdWriteAgeSeconds: report.ColdWriteAgeSeconds,
 		ColdWriteStale:      report.ColdWriteStale,

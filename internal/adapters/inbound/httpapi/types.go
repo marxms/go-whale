@@ -49,6 +49,9 @@ type CandleDTO struct {
 	SideUnknownCount int64   `json:"sideUnknownCount,omitempty"`
 	LateTradeCount   int64   `json:"lateTradeCount,omitempty"`
 	HasGap           bool    `json:"hasGap,omitempty"`
+	// GapCause names WHY the bar is marked, so the consumer can separate a volume-only shortfall
+	// (prices exact) from a provisional value (prices unproven). Omitted when clean.
+	GapCause string `json:"gapCause,omitempty"`
 }
 
 // TradesResponse is the JSON body of one trade window.

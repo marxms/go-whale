@@ -74,6 +74,11 @@ type CandleDTO struct {
 	SideUnknownCount int64 `json:"sideUnknownCount,omitempty"`
 	LateTradeCount   int64 `json:"lateTradeCount,omitempty"`
 	HasGap           bool  `json:"hasGap,omitempty"`
+	// GapCause names WHY the bucket is marked. `hasGap` alone tells the consumer that the bar is
+	// unproven but not whether its PRICES are: a volume-only shortfall leaves OHLC exact, a
+	// provisional value may be wrong in every field. Omitted when the bucket is clean, so a reader
+	// that ignores the field keeps the old contract byte for byte.
+	GapCause string `json:"gapCause,omitempty"`
 }
 
 // NewCandleDTO maps a domain candle onto the wire shape. Origin is process-local
@@ -99,6 +104,7 @@ func NewCandleDTO(c candle.Candle) CandleDTO {
 		SideUnknownCount: c.SideUnknownCount,
 		LateTradeCount:   c.LateTradeCount,
 		HasGap:           c.HasGap,
+		GapCause:         c.GapCauseName(),
 	}
 }
 
@@ -125,6 +131,7 @@ func (d CandleDTO) ToCandle() candle.Candle {
 		SideUnknownCount: d.SideUnknownCount,
 		LateTradeCount:   d.LateTradeCount,
 		HasGap:           d.HasGap,
+		GapKind:          candle.GapKindFromCause(d.GapCause, d.HasGap),
 	}
 }
 
