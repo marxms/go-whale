@@ -39,8 +39,11 @@ type MetricsCollector struct {
 	// timeframeFreshness stores func() ([]health.TimeframeFreshness, bool): the only probe that
 	// can see a DERIVED timeframe freeze while the scope-level aggregate looks live.
 	timeframeFreshness atomic.Value
-	aggregator         *health.Aggregator
-	log                *slog.Logger
+	// partitions stores func() ([]health.PartitionHealth, bool): one row per feed partition,
+	// so a silent partition is visible without reading the process's sockets.
+	partitions atomic.Value
+	aggregator *health.Aggregator
+	log        *slog.Logger
 }
 
 // fleetLivenessSnapshot is the ONE atomic record the sampler publishes. The failing
@@ -79,6 +82,13 @@ func NewMetricsCollector(hybridManager HybridManagerStats, logs ...*slog.Logger)
 		FeedProducers: func() ([]health.FeedProducerReport, bool) {
 			v, ok := mc.feedProducers.Load().([]health.FeedProducerReport)
 			return v, ok
+		},
+		Partitions: func() ([]health.PartitionHealth, bool) {
+			probe, _ := mc.partitions.Load().(func() ([]health.PartitionHealth, bool))
+			if probe == nil {
+				return nil, false
+			}
+			return probe()
 		},
 		TimeframeFreshness: func() ([]health.TimeframeFreshness, bool) {
 			probe, _ := mc.timeframeFreshness.Load().(func() ([]health.TimeframeFreshness, bool))
@@ -191,6 +201,12 @@ func (mc *MetricsCollector) SetFeedProducers(reports []health.FeedProducerReport
 // window, any expected scope without a healthy connected stream makes /health
 // report "unhealthy"/503, so a totally dead exchange does not pass the probe.
 // Passing an empty slice disables the expected-scope check (lenient mode).
+// SetPartitions publishes the live feed partitions. Observational: the verdict over a
+// silent fraction belongs to fleet liveness, so this setter never decides the HTTP status.
+func (mc *MetricsCollector) SetPartitions(probe func() ([]health.PartitionHealth, bool)) {
+	mc.partitions.Store(probe)
+}
+
 func (mc *MetricsCollector) SetExpectedScopes(scopes []string) {
 	canon := make([]string, 0, len(scopes))
 	for _, s := range scopes {
@@ -207,6 +223,7 @@ type HealthResponse struct {
 	Uptime            string                    `json:"uptime"`
 	Goroutines        int                       `json:"goroutines"`
 	Connections       []ConnectionHealthSummary `json:"connections,omitempty"`
+	Partitions        []health.PartitionHealth  `json:"partitions,omitempty"`
 	DerivativesPoller bool                      `json:"derivatives_poller"` // true if the poller goroutine is alive
 	TimeframeChecksum string                    `json:"timeframe_checksum,omitempty"`
 	MissingScopes     []string                  `json:"missing_scopes,omitempty"`    // expected scopes with no healthy connected stream (post-grace)
@@ -278,6 +295,7 @@ func (mc *MetricsCollector) Health(w http.ResponseWriter, _ *http.Request) {
 		Uptime:              report.Uptime,
 		Goroutines:          report.Goroutines,
 		Connections:         summaries,
+		Partitions:          report.Partitions,
 		DerivativesPoller:   report.DerivativesPoller,
 		TimeframeChecksum:   report.TimeframeChecksum,
 		MissingScopes:       report.MissingScopes,

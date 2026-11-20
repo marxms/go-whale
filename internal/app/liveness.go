@@ -155,6 +155,35 @@ func (a *App) sampleFleetLivenessFromConfig(ctx context.Context, provider recove
 	)
 }
 
+// partitionHealth maps the kline feed's per-partition stats onto the /health DTO. The feed is
+// read through an optional interface so a test double or a non-partitioned feed reports
+// "not configured" instead of pretending a partition exists.
+func (a *App) partitionHealth() ([]health.PartitionHealth, bool) {
+	a.klineMu.Lock()
+	feed := a.klineFeed
+	a.klineMu.Unlock()
+	provider, ok := feed.(interface {
+		PartitionStats() []binancesdk.PartitionStat
+	})
+	if !ok {
+		return nil, false
+	}
+	stats := provider.PartitionStats()
+	out := make([]health.PartitionHealth, 0, len(stats))
+	for _, stat := range stats {
+		out = append(out, health.PartitionHealth{
+			ID:             stat.ID,
+			Symbols:        stat.Symbols,
+			Frames:         stat.Frames,
+			LastFrameAgeMs: stat.LastFrameAge.Milliseconds(),
+			Reconnects:     stat.Reconnects,
+			Restores:       stat.Restores,
+			LastCloseAtMs:  stat.LastCloseAtMs,
+		})
+	}
+	return out, true
+}
+
 // feedProducerReports names the producer of the newest readable candle for the mounted
 // kline feed's scope. The feed's last-frame clock and the persisted watermark together
 // distinguish ws_kline from rest_total without a second monitor: while the feed is the

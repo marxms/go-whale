@@ -18,6 +18,9 @@ func (a *App) buildHTTP(cfg config.Config, tfReg *candle.TimeframeRegistry, metr
 	a.metricsCollector = httpapi.NewMetricsCollector(a.manager, a.log)
 	a.metricsCollector.SetGaugeSink(metricsProvider.HealthSink())
 	a.metricsCollector.SetTimeframeRegistry(tfReg)
+	// One row per feed partition: the row is what distinguishes a silent partition from a dead
+	// fleet without reading the process's sockets.
+	a.metricsCollector.SetPartitions(a.partitionHealth)
 
 	// The per-TIMEFRAME data age. Without it a derived timeframe can freeze under a live 5m while
 	// /health keeps saying healthy.

@@ -53,6 +53,20 @@ type ConnectionSummary struct {
 	Symbols    int
 }
 
+// PartitionHealth is one live feed partition as /health publishes it. It is the row an
+// operator reads to tell a silent partition from a dead fleet without opening sockets.
+type PartitionHealth struct {
+	ID             int   `json:"id"`
+	Symbols        int   `json:"symbols"`
+	Frames         int64 `json:"frames"`
+	LastFrameAgeMs int64 `json:"last_frame_age_ms"`
+	Reconnects     int64 `json:"reconnects"`
+	Restores       int64 `json:"restores"`
+	// LastCloseAtMs is when the newest CLOSED kline frame was received on this partition;
+	// zero when no close has arrived since the connection opened.
+	LastCloseAtMs int64 `json:"last_close_at_ms"`
+}
+
 // ComponentState is the per-component verdict. "absent" means the component is not
 // mounted or not configured; it is never a passed check.
 type ComponentState string
@@ -164,6 +178,9 @@ type Probes struct {
 	StartedAt func() time.Time
 	// Connections returns the current connection set.
 	Connections func() []Connection
+	// Partitions returns one row per live feed partition. Observational: the verdict over a
+	// silent fraction belongs to fleet liveness, not to this probe.
+	Partitions func() ([]PartitionHealth, bool)
 	// ExpectedScopes returns the canonical scopes that MUST be live after the grace.
 	ExpectedScopes func() ([]string, bool)
 	// LivenessFailing returns scopes whose per-symbol fleet liveness is below threshold.
@@ -202,6 +219,7 @@ type Report struct {
 	Goroutines int
 
 	Connections        []ConnectionSummary
+	Partitions         []PartitionHealth
 	DerivativesPoller  bool
 	TimeframeChecksum  string
 	MissingScopes      []string
@@ -587,12 +605,20 @@ func (a *Aggregator) Evaluate() Report {
 		}
 	}
 
+	var partitions []PartitionHealth
+	if a.probes.Partitions != nil {
+		if rows, configured := a.probes.Partitions(); configured {
+			partitions = rows
+		}
+	}
+
 	return Report{
 		Status:              status,
 		HTTPStatus:          httpStatus,
 		Uptime:              now.Sub(start).Round(time.Second).String(),
 		Goroutines:          runtime.NumGoroutine(),
 		Connections:         summaries,
+		Partitions:          partitions,
 		DerivativesPoller:   derivPoller,
 		TimeframeChecksum:   checksum,
 		MissingScopes:       missingScopes,

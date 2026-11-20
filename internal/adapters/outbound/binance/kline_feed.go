@@ -135,9 +135,10 @@ type klinePartition struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 
-	frames     atomic.Int64
-	reconnects atomic.Int64
-	restores   atomic.Int64
+	frames      atomic.Int64
+	lastCloseAt atomic.Int64 // ms UTC of the newest CLOSED kline frame
+	reconnects  atomic.Int64
+	restores    atomic.Int64
 	// faults counts THIS partition's consecutive transport errors. A feed-global counter let a
 	// healthy sister's frames reset it every few milliseconds, so a partition retrying forever was
 	// invisible: the restart verdict could only ever describe the fleet.
@@ -153,6 +154,8 @@ type PartitionStat struct {
 	LastFrameAge time.Duration
 	Reconnects   int64
 	Restores     int64
+	// LastCloseAtMs is when the newest CLOSED kline frame arrived; zero when none has.
+	LastCloseAtMs int64
 }
 
 // Mute discards a symbol's frames and retains the socket while other symbols use it.
@@ -378,12 +381,13 @@ func (f *KlineFeed) PartitionStats() []PartitionStat {
 	out := make([]PartitionStat, 0, len(f.parts))
 	for _, part := range f.parts {
 		out = append(out, PartitionStat{
-			ID:           part.client.ID,
-			Symbols:      part.symbols,
-			Frames:       part.frames.Load(),
-			LastFrameAge: time.Duration(now-part.lastFrameAt.Load()) * time.Millisecond,
-			Reconnects:   part.reconnects.Load(),
-			Restores:     part.restores.Load(),
+			ID:            part.client.ID,
+			Symbols:       part.symbols,
+			Frames:        part.frames.Load(),
+			LastFrameAge:  time.Duration(now-part.lastFrameAt.Load()) * time.Millisecond,
+			Reconnects:    part.reconnects.Load(),
+			Restores:      part.restores.Load(),
+			LastCloseAtMs: part.lastCloseAt.Load(),
 		})
 	}
 	return out
@@ -420,12 +424,13 @@ func (f *KlineFeed) SilentPartition(limitSeconds float64) (PartitionStat, []stri
 		return PartitionStat{}, nil, false
 	}
 	return PartitionStat{
-		ID:           worst.client.ID,
-		Symbols:      worst.symbols,
-		Frames:       worst.frames.Load(),
-		LastFrameAge: time.Duration(now-worst.lastFrameAt.Load()) * time.Millisecond,
-		Reconnects:   worst.reconnects.Load(),
-		Restores:     worst.restores.Load(),
+		ID:            worst.client.ID,
+		Symbols:       worst.symbols,
+		Frames:        worst.frames.Load(),
+		LastFrameAge:  time.Duration(now-worst.lastFrameAt.Load()) * time.Millisecond,
+		Reconnects:    worst.reconnects.Load(),
+		Restores:      worst.restores.Load(),
+		LastCloseAtMs: worst.lastCloseAt.Load(),
 	}, append([]string(nil), worst.members...), true
 }
 
@@ -678,8 +683,12 @@ func (f *KlineFeed) dial(symbols []string, preferredID int) ([]*klinePartition, 
 				f.metrics.incKlineFrame(f.exchange, f.marketType)
 				f.metrics.incKlinePartitionFrame(f.exchange, f.marketType, id)
 				f.noteFrame(conn)
+				nowMs := time.Now().UnixMilli()
 				conn.frames.Add(1)
-				conn.lastFrameAt.Store(time.Now().UnixMilli())
+				conn.lastFrameAt.Store(nowMs)
+				if event.Kline.Closed != nil && *event.Kline.Closed {
+					conn.lastCloseAt.Store(nowMs)
+				}
 				f.onCandle(symbol, candle)
 			}
 		}
