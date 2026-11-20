@@ -62,6 +62,7 @@ type HotWriter struct {
 	dropped   atomic.Int64
 	failed    atomic.Int64
 	stopped   atomic.Bool
+	startOnce sync.Once
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -90,7 +91,8 @@ func WithHotWriterInterval(d time.Duration) HotWriterOption {
 	}
 }
 
-// NewHotWriter starts the single owner goroutine. The caller must Stop it.
+// NewHotWriter builds the writer. The owner starts on the first admission, so an App that never
+// closes a bucket carries no idle goroutine; the caller must Stop it.
 func NewHotWriter(flush HotFlush, opts ...HotWriterOption) *HotWriter {
 	w := &HotWriter{
 		flush:    flush,
@@ -103,19 +105,18 @@ func NewHotWriter(flush HotFlush, opts ...HotWriterOption) *HotWriter {
 		opt(w)
 	}
 	w.ctx, w.cancel = context.WithCancel(context.Background())
-	w.wg.Add(1)
-	go w.run()
 	return w
 }
 
 // Enqueue admits a closed-bucket snapshot without doing I/O. It returns false only when a NEW
 // key arrives while the bounded queue is full; an existing key is coalesced and admitted.
 func (w *HotWriter) Enqueue(key CompositeKey, c candle.Candle) bool {
+	w.mu.Lock()
 	if w.stopped.Load() {
+		w.mu.Unlock()
 		w.dropped.Add(1)
 		return false
 	}
-	w.mu.Lock()
 	_, exists := w.pending[key]
 	if !exists && len(w.pending)+w.inFlight >= w.capacity {
 		w.mu.Unlock()
@@ -126,6 +127,11 @@ func (w *HotWriter) Enqueue(key CompositeKey, c candle.Candle) bool {
 		w.coalesced.Add(1)
 	}
 	w.pending[key] = hotWrite{key: key, candle: c, atMs: time.Now().UnixMilli()}
+	// Start under the lock so the WaitGroup Add cannot race the Stop's Wait.
+	w.startOnce.Do(func() {
+		w.wg.Add(1)
+		go w.run()
+	})
 	w.mu.Unlock()
 	select {
 	case w.wake <- struct{}{}:
@@ -159,10 +165,13 @@ func (w *HotWriter) Stats() HotWriterStats {
 
 // Stop drains once and joins the owner. A blocked owner is bounded by ctx.
 func (w *HotWriter) Stop(ctx context.Context) error {
+	w.mu.Lock()
 	if w.stopped.Swap(true) {
+		w.mu.Unlock()
 		return nil
 	}
 	w.cancel()
+	w.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		w.wg.Wait()
@@ -186,9 +195,11 @@ func (w *HotWriter) run() {
 			w.flushPending(context.Background())
 			return
 		case <-ticker.C:
-			w.flushPending(w.ctx)
+			// The batch context is NOT the loop's: Stop cancels the loop, and canceling an
+			// in-flight Redis batch would lose it after the entries were already dequeued.
+			w.flushPending(context.Background())
 		case <-w.wake:
-			w.flushPending(w.ctx)
+			w.flushPending(context.Background())
 		}
 	}
 }

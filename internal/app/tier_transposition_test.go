@@ -138,6 +138,19 @@ func coldProjection(c candle.Candle) candle.Candle {
 // HARNESS
 // ============================================================================
 
+// syncHotWriter keeps these assertions synchronous: the tests inspect every tier right after
+// the action, while the production owner flushes in the background.
+type syncHotWriter struct {
+	store *engine.TieredStore
+}
+
+func (s syncHotWriter) Enqueue(key engine.CompositeKey, c candle.Candle) bool {
+	s.store.WriteClosedToHot(key, c)
+	return true
+}
+
+func (s syncHotWriter) Stop(context.Context) error { return nil }
+
 // transpositionRig is the production wiring with fakes only at the two edges that need a
 // server. It registers the SAME callbacks NewApp registers (app.go:204-205); registering
 // anything else here would test a system that does not exist.
@@ -188,6 +201,7 @@ func newTranspositionRig(t *testing.T) *transpositionRig {
 
 	app := &App{
 		tieredStore:  tiered,
+		hotWriter:    syncHotWriter{store: tiered},
 		candleEngine: ce,
 		qdbPipeline:  pipe,
 		redisStore:   redisStore,
