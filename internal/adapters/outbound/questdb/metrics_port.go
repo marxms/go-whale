@@ -6,6 +6,13 @@ type Metrics struct {
 	ColdPipelineBlocked     func(v float64)
 	ColdPipelinePendingRows func(v float64)
 	ColdSeedNoopRows        func(n float64)
+	ColdPipelineDropped     func(exchange, marketType string)
+}
+
+func (m Metrics) incColdPipelineDropped(exchange, marketType string) {
+	if m.ColdPipelineDropped != nil {
+		m.ColdPipelineDropped(exchange, marketType)
+	}
 }
 
 func (m Metrics) addDerivativesColdDegraded(outcome string, n float64) {

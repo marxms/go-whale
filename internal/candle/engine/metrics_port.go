@@ -27,6 +27,21 @@ type Metrics struct {
 	DurableTimeframeCovered   func(timeframe string, v float64)
 	DurableIncoherentFunding  func(timeframe string, v float64)
 	DurableDimensionsMeasured func(v float64)
+
+	ColdPendingDepth func(exchange, marketType string, v float64)
+	ColdDurableFalse func(exchange, marketType string)
+}
+
+func (m Metrics) setColdPendingDepth(exchange, marketType string, v float64) {
+	if m.ColdPendingDepth != nil {
+		m.ColdPendingDepth(exchange, marketType, v)
+	}
+}
+
+func (m Metrics) incColdDurableFalse(exchange, marketType string) {
+	if m.ColdDurableFalse != nil {
+		m.ColdDurableFalse(exchange, marketType)
+	}
 }
 
 func (m Metrics) incWarmSeed(exchange, marketType, timeframe, outcome string) {

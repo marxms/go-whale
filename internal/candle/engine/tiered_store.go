@@ -409,15 +409,18 @@ func (ts *TieredStore) ColdDurable(ctx context.Context, exchange, marketType, sy
 	if barrier, ok := ts.cold.(candle.ColdStoreApplyBarrier); ok {
 		target, err := barrier.CaptureApplyTarget(ctx)
 		if err != nil {
+			ts.metrics.incColdDurableFalse(exchange, marketType)
 			return false, err
 		}
 		if err := barrier.WaitApplied(ctx, target); err != nil {
+			ts.metrics.incColdDurableFalse(exchange, marketType)
 			return false, err
 		}
 	}
 	bar := time.UnixMilli(barMs)
 	candles, err := ts.cold.QueryRange(ctx, exchange, marketType, symbol, timeframe, bar, bar, 1)
 	if err != nil {
+		ts.metrics.incColdDurableFalse(exchange, marketType)
 		return false, err
 	}
 	for _, c := range candles {
@@ -425,6 +428,7 @@ func (ts *TieredStore) ColdDurable(ctx context.Context, exchange, marketType, sy
 			return true, nil
 		}
 	}
+	ts.metrics.incColdDurableFalse(exchange, marketType)
 	return false, nil
 }
 

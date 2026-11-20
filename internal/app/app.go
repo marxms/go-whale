@@ -101,6 +101,7 @@ type App struct {
 	// COMMODITY, ...). They follow the venue's own trading hours, so the fleet-liveness
 	// denominator excludes them; their WebSocket health and gap recovery still apply.
 	nonCoinSymbols     sync.Map
+	coldPending        sync.Map // exchange:market_type -> *atomic.Int64, the marked-not-durable depth
 	metrics            AppMetrics
 	streamMetrics      streaming.Metrics
 	binanceMetrics     binancesdk.Metrics

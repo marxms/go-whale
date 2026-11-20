@@ -165,6 +165,7 @@ func (p *Pipeline) Enqueue(exchange, marketType, symbol, timeframe string, c can
 		return true, id
 	default:
 		dropped := p.dropped.Add(1)
+		p.metrics.incColdPipelineDropped(exchange, marketType)
 		if dropped%100 == 1 {
 			logger.OrDiscard(p.log).Warn("questdb pipeline: buffer full; dropped candle",
 				"exchange", exchange,

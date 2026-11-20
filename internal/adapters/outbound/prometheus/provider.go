@@ -354,6 +354,15 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 	coldSeedNoopRows := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "cold_seed_noop_rows_total", Help: "Seed/backfill rows whose complete physical cold write was already applied before this sweep; this is not a WAL acknowledgement for other rows.",
 	})
+	coldPipelineDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cold_pipeline_dropped_total", Help: "Closed candles refused by the non-blocking cold pipeline, by exchange and market type. >0 means the cold copy is behind and the bar was marked cold_pending.",
+	}, []string{labelExchange, labelMarketType})
+	coldPendingDepth := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cold_pending_depth", Help: "Bars marked cold_pending by refused cold writes, by exchange and market type.",
+	}, []string{labelExchange, labelMarketType})
+	coldDurableFalse := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cold_durable_false_total", Help: "ColdDurable checks that found the bar not readable from the cold after the apply barrier, by exchange and market type.",
+	}, []string{labelExchange, labelMarketType})
 	coldFlushAge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "cold_last_flush_age_seconds",
 		Help: "Seconds since the cold tier (QuestDB) last COMMITTED a batch. Climbs when writes are failing or when no closed candles are being produced; NaN when no cold store is configured. This is the signal that was absent during the 13h silent cold-write outage.",
@@ -363,6 +372,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		ColdPipelineBlocked:     func(v float64) { coldPipelineBlocked.Set(v) },
 		ColdPipelinePendingRows: func(v float64) { coldPipelinePendingRows.Set(v) },
 		ColdSeedNoopRows:        func(n float64) { coldSeedNoopRows.Add(n) },
+		ColdPipelineDropped:     func(ex, mt string) { coldPipelineDropped.WithLabelValues(ex, mt).Inc() },
 	}
 
 	// Redis derivatives.
@@ -490,6 +500,8 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		DurableTimeframeCovered:       func(tf string, v float64) { durableTimeframeCovered.WithLabelValues(tf).Set(v) },
 		DurableIncoherentFunding:      func(tf string, v float64) { durableIncoherentFunding.WithLabelValues(tf).Set(v) },
 		DurableDimensionsMeasured:     func(v float64) { durableDimensionsMeasured.Set(v) },
+		ColdPendingDepth:              func(ex, mt string, v float64) { coldPendingDepth.WithLabelValues(ex, mt).Set(v) },
+		ColdDurableFalse:              func(ex, mt string) { coldDurableFalse.WithLabelValues(ex, mt).Inc() },
 	}
 
 	// Derivatives collector.
@@ -758,7 +770,8 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		symbolsConfigured, symbolsEffective,
 		// ── Derivatives adapters ──────────────────────────────────────────
 		lsrShareSumViolation, capabilityAbsent, derivativesColdDegraded, coldPipelineBlocked,
-		coldPipelinePendingRows, coldSeedNoopRows, coldFlushAge, seriesNonFinite,
+		coldPipelinePendingRows, coldSeedNoopRows, coldFlushAge, coldPipelineDropped,
+		coldPendingDepth, coldDurableFalse, seriesNonFinite,
 		// ── Candle engine ─────────────────────────────────────────────────
 		warmSeed, deltaInsideHorizon, appliedDeltaVolume, coldMissingBuckets,
 		coldSymbolsWithGaps, coldSymbolsExpected, coldSymbolsAbsent, durableRows,

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/marxms/go-whale/internal/adapters/inbound/realtime"
@@ -160,6 +161,11 @@ func coldPendingKey(id questdb.ColdID) string {
 // repair for the exact bucket. The repair is the authority; the marker keeps the refusal visible
 // until it is reconciled, so a cold copy is never reported complete by omission.
 func (a *App) markColdPending(id questdb.ColdID) {
+	counter, _ := a.coldPending.LoadOrStore(id.Exchange+":"+id.MarketType, new(atomic.Int64))
+	depth := counter.(*atomic.Int64).Add(1)
+	if a.engineMetrics.ColdPendingDepth != nil {
+		a.engineMetrics.ColdPendingDepth(id.Exchange, id.MarketType, float64(depth))
+	}
 	if a.redisStore != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), coldPendingWriteTimeout)
 		if err := a.redisStore.Client().Set(ctx, coldPendingKey(id), "1", coldPendingTTL).Err(); err != nil {
