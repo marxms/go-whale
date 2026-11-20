@@ -65,6 +65,14 @@ type PartitionHealth struct {
 	// LastCloseAtMs is when the newest CLOSED kline frame was received on this partition;
 	// zero when no close has arrived since the connection opened.
 	LastCloseAtMs int64 `json:"last_close_at_ms"`
+	// Evidence of the newest terminal event: the code the venue sent (zero when no frame
+	// arrived), the classified cause, the age of the socket at close, the streams it carried
+	// and the age of the freshest sister's last frame.
+	LastCloseCode        int    `json:"last_close_code"`
+	LastCloseCause       string `json:"last_close_cause"`
+	LastCloseDialAgeMs   int64  `json:"last_close_dial_age_ms"`
+	LastCloseStreams     int    `json:"last_close_streams"`
+	LastCloseSisterAgeMs int64  `json:"last_close_sister_age_ms"`
 }
 
 // ComponentState is the per-component verdict. "absent" means the component is not

@@ -76,6 +76,8 @@ func TestHealthReportExposesPartitionFramesReconnects(t *testing.T) {
 			return []health.PartitionHealth{{
 				ID: 7, Symbols: 12, Frames: 9_001, LastFrameAgeMs: 1_200,
 				Reconnects: 3, Restores: 4, LastCloseAtMs: closeAt,
+				LastCloseCode: 1006, LastCloseCause: "transport_unattributed",
+				LastCloseDialAgeMs: 90_000, LastCloseStreams: 12, LastCloseSisterAgeMs: 250,
 			}}, true
 		},
 	}).Evaluate()
@@ -89,6 +91,13 @@ func TestHealthReportExposesPartitionFramesReconnects(t *testing.T) {
 	}
 	if row.LastCloseAtMs != closeAt {
 		t.Fatalf("last close = %d, want %d", row.LastCloseAtMs, closeAt)
+	}
+	// A close is attributable per partition: code, cause, dial age, streams and sister health.
+	if row.LastCloseCode != 1006 || row.LastCloseCause != "transport_unattributed" {
+		t.Fatalf("close evidence = %d/%q, want 1006/transport_unattributed", row.LastCloseCode, row.LastCloseCause)
+	}
+	if row.LastCloseDialAgeMs != 90_000 || row.LastCloseStreams != 12 || row.LastCloseSisterAgeMs != 250 {
+		t.Fatalf("close detail = %+v, want dial age, streams and sister age", row)
 	}
 
 	// No feed mounted: absence is reported as no rows, never as a fabricated partition.

@@ -215,13 +215,18 @@ func (a *App) partitionHealth() ([]health.PartitionHealth, bool) {
 	out := make([]health.PartitionHealth, 0, len(stats))
 	for _, stat := range stats {
 		out = append(out, health.PartitionHealth{
-			ID:             stat.ID,
-			Symbols:        stat.Symbols,
-			Frames:         stat.Frames,
-			LastFrameAgeMs: stat.LastFrameAge.Milliseconds(),
-			Reconnects:     stat.Reconnects,
-			Restores:       stat.Restores,
-			LastCloseAtMs:  stat.LastCloseAtMs,
+			ID:                   stat.ID,
+			Symbols:              stat.Symbols,
+			Frames:               stat.Frames,
+			LastFrameAgeMs:       stat.LastFrameAge.Milliseconds(),
+			Reconnects:           stat.Reconnects,
+			Restores:             stat.Restores,
+			LastCloseAtMs:        stat.LastCloseAtMs,
+			LastCloseCode:        stat.LastCloseCode,
+			LastCloseCause:       stat.LastCloseCause,
+			LastCloseDialAgeMs:   stat.LastCloseDialAge.Milliseconds(),
+			LastCloseStreams:     stat.LastCloseStreams,
+			LastCloseSisterAgeMs: stat.LastCloseSisterAge.Milliseconds(),
 		})
 	}
 	return out, true

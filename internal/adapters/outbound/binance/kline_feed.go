@@ -143,6 +143,16 @@ type klinePartition struct {
 	// healthy sister's frames reset it every few milliseconds, so a partition retrying forever was
 	// invisible: the restart verdict could only ever describe the fleet.
 	faults atomic.Int32
+
+	// lastClose is the evidence of the newest terminal event, retained for /health. It is written
+	// once per connection lifetime, after the watcher classifies the cause.
+	lastCloseMu          sync.Mutex
+	lastCloseCode        int
+	lastCloseCause       string
+	lastCloseAtMs        int64
+	lastCloseDialAgeMs   int64
+	lastCloseStreams     int
+	lastCloseSisterAgeMs int64
 }
 
 // PartitionStat is one connection's contribution to the feed, published so a
@@ -156,6 +166,12 @@ type PartitionStat struct {
 	Restores     int64
 	// LastCloseAtMs is when the newest CLOSED kline frame arrived; zero when none has.
 	LastCloseAtMs int64
+	// Evidence of the newest terminal event, so a close is attributable per partition.
+	LastCloseCode      int
+	LastCloseCause     string
+	LastCloseDialAge   time.Duration
+	LastCloseStreams   int
+	LastCloseSisterAge time.Duration
 }
 
 // Mute discards a symbol's frames and retains the socket while other symbols use it.
@@ -380,17 +396,86 @@ func (f *KlineFeed) PartitionStats() []PartitionStat {
 	now := time.Now().UnixMilli()
 	out := make([]PartitionStat, 0, len(f.parts))
 	for _, part := range f.parts {
+		evidence := part.closeEvidence()
 		out = append(out, PartitionStat{
-			ID:            part.client.ID,
-			Symbols:       part.symbols,
-			Frames:        part.frames.Load(),
-			LastFrameAge:  time.Duration(now-part.lastFrameAt.Load()) * time.Millisecond,
-			Reconnects:    part.reconnects.Load(),
-			Restores:      part.restores.Load(),
-			LastCloseAtMs: part.lastCloseAt.Load(),
+			ID:                 part.client.ID,
+			Symbols:            part.symbols,
+			Frames:             part.frames.Load(),
+			LastFrameAge:       time.Duration(now-part.lastFrameAt.Load()) * time.Millisecond,
+			Reconnects:         part.reconnects.Load(),
+			Restores:           part.restores.Load(),
+			LastCloseAtMs:      part.lastCloseAt.Load(),
+			LastCloseCode:      evidence.code,
+			LastCloseCause:     evidence.cause,
+			LastCloseDialAge:   evidence.dialAge,
+			LastCloseStreams:   evidence.streams,
+			LastCloseSisterAge: evidence.sisterAge,
 		})
 	}
 	return out
+}
+
+// partitionCloseEvidence is the retained terminal-event evidence, copied under the lock.
+type partitionCloseEvidence struct {
+	code      int
+	cause     string
+	dialAge   time.Duration
+	streams   int
+	sisterAge time.Duration
+}
+
+// closeEvidence copies the retained terminal-event evidence under the partition lock.
+func (p *klinePartition) closeEvidence() partitionCloseEvidence {
+	p.lastCloseMu.Lock()
+	defer p.lastCloseMu.Unlock()
+	return partitionCloseEvidence{
+		code:      p.lastCloseCode,
+		cause:     p.lastCloseCause,
+		dialAge:   time.Duration(p.lastCloseDialAgeMs) * time.Millisecond,
+		streams:   p.lastCloseStreams,
+		sisterAge: time.Duration(p.lastCloseSisterAgeMs) * time.Millisecond,
+	}
+}
+
+// recordClose retains the terminal evidence for /health. The cause prefers the initiator (our own
+// shutdown/renewal is never a venue fault) and falls back to the transport classification.
+func (p *klinePartition) recordClose(ws *binancews.Connection) {
+	evidence := ws.CloseEvidence()
+	cause := evidence.Initiator
+	if cause == "" {
+		cause = classifyDisconnect(ws.TerminalError())
+	}
+	p.lastCloseMu.Lock()
+	p.lastCloseCode = evidence.Code
+	p.lastCloseCause = cause
+	p.lastCloseAtMs = time.Now().UnixMilli()
+	p.lastCloseDialAgeMs = evidence.DialAge.Milliseconds()
+	p.lastCloseStreams = evidence.Streams
+	p.lastCloseSisterAgeMs = evidence.SisterLastFrameAge.Milliseconds()
+	p.lastCloseMu.Unlock()
+}
+
+// freshestSisterAge is the age of the freshest OTHER partition's last frame. Zero means no
+// sister. It is the comparison the close evidence needs to tell a scoped fault from a fleet one.
+func (f *KlineFeed) freshestSisterAge(exclude *klinePartition) time.Duration {
+	f.mu.Lock()
+	parts := append([]*klinePartition(nil), f.parts...)
+	f.mu.Unlock()
+	now := time.Now().UnixMilli()
+	best := int64(-1)
+	for _, part := range parts {
+		if part == exclude {
+			continue
+		}
+		age := now - part.lastFrameAt.Load()
+		if best < 0 || age < best {
+			best = age
+		}
+	}
+	if best < 0 {
+		return 0
+	}
+	return time.Duration(best) * time.Millisecond
 }
 
 // SilentPartition reports the ONE partition that has been silent past limitSeconds while at least
@@ -423,14 +508,20 @@ func (f *KlineFeed) SilentPartition(limitSeconds float64) (PartitionStat, []stri
 	if worst == nil || fresh == 0 {
 		return PartitionStat{}, nil, false
 	}
+	evidence := worst.closeEvidence()
 	return PartitionStat{
-		ID:            worst.client.ID,
-		Symbols:       worst.symbols,
-		Frames:        worst.frames.Load(),
-		LastFrameAge:  time.Duration(now-worst.lastFrameAt.Load()) * time.Millisecond,
-		Reconnects:    worst.reconnects.Load(),
-		Restores:      worst.restores.Load(),
-		LastCloseAtMs: worst.lastCloseAt.Load(),
+		ID:                 worst.client.ID,
+		Symbols:            worst.symbols,
+		Frames:             worst.frames.Load(),
+		LastFrameAge:       time.Duration(now-worst.lastFrameAt.Load()) * time.Millisecond,
+		Reconnects:         worst.reconnects.Load(),
+		Restores:           worst.restores.Load(),
+		LastCloseAtMs:      worst.lastCloseAt.Load(),
+		LastCloseCode:      evidence.code,
+		LastCloseCause:     evidence.cause,
+		LastCloseDialAge:   evidence.dialAge,
+		LastCloseStreams:   evidence.streams,
+		LastCloseSisterAge: evidence.sisterAge,
 	}, append([]string(nil), worst.members...), true
 }
 
@@ -705,7 +796,16 @@ func (f *KlineFeed) dial(symbols []string, preferredID int) ([]*klinePartition, 
 		conn.wg.Add(1)
 		go func(partitionID int) {
 			defer conn.wg.Done()
-			watchTransportError(conn.ctx, partitionID, ws, f.marketType, f.metrics, f.netdiag, func(string) { conn.faults.Add(1) }, f.log)
+			watchTransportError(
+				conn.ctx, partitionID, ws, f.marketType, f.metrics, f.netdiag,
+				func(string) { conn.faults.Add(1) }, f.log,
+				// The sibling's age is measured HERE, not in the transport: only the feed knows
+				// which connection is the victim and which one is still delivering.
+				func() time.Duration { return f.freshestSisterAge(conn) },
+			)
+			// Retain the evidence for /health even when the watcher returned before the log
+			// (context cancellation): the close happened either way.
+			conn.recordClose(ws)
 		}(id)
 	}
 	if err := f.ctx.Err(); err != nil {

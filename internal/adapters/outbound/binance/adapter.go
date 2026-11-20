@@ -877,7 +877,7 @@ func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
 		go func() {
 			defer c.connWg.Done()
 			watchTransportError(connCtx, pid, conn, marketTypeFuture, c.metrics, c.netdiag,
-				func(reason string) { c.requestReconnect(pid, reason) }, c.log)
+				func(reason string) { c.requestReconnect(pid, reason) }, c.log, nil)
 		}()
 	}
 	c.triggerGapRecovery(symbols)

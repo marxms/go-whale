@@ -54,6 +54,15 @@ type CloseEvidence struct {
 	Code      int
 	Reason    string
 	Initiator string
+	// DialAge is how long the connection had been established when it ended. It separates a
+	// venue that drops a long-lived socket from a network that cannot keep one.
+	DialAge time.Duration
+	// Streams is how many streams the closed connection carried. The failure rate the owner
+	// needs is per stream, not per connection.
+	Streams int
+	// SisterLastFrameAge is stamped by the partitioned owner: the age of the freshest sibling
+	// partition's last frame. Zero means no sister (or none observed).
+	SisterLastFrameAge time.Duration
 }
 
 // Handler receives the `data` object of one combined-stream frame. It runs on
@@ -110,6 +119,10 @@ type Connection struct {
 	handlers   map[string]Handler
 
 	lastMessageAt atomic.Int64
+	// dialedAtMs is when the socket was established; the evidence reports its age at close.
+	dialedAtMs atomic.Int64
+	// streams is the number of streams the connection carried, fixed at Connect.
+	streams atomic.Int32
 
 	done  chan struct{}
 	errCh chan error
@@ -207,6 +220,10 @@ func (c *Connection) Connect(ctx context.Context, handlers map[string]Handler) e
 	}
 	c.handlersMu.Unlock()
 
+	c.handlersMu.RLock()
+	streamCount := len(c.handlers)
+	c.handlersMu.RUnlock()
+
 	target, err := c.urlFor(handlers)
 	if err != nil {
 		return err
@@ -235,7 +252,10 @@ func (c *Connection) Connect(ctx context.Context, handlers map[string]Handler) e
 	}
 	c.conn = conn
 	c.connected.Store(true)
-	c.lastMessageAt.Store(time.Now().UnixMilli())
+	nowMs := time.Now().UnixMilli()
+	c.lastMessageAt.Store(nowMs)
+	c.dialedAtMs.Store(nowMs)
+	c.streams.Store(int32(streamCount))
 	c.connMu.Unlock()
 
 	c.wg.Add(1)
@@ -470,6 +490,14 @@ func (c *Connection) CloseEvidence() CloseEvidence {
 	return c.evidence
 }
 
+// SetSisterLastFrameAge stamps the partition's sibling health into the retained evidence. The
+// transport cannot know its siblings; the partitioned owner is the only one that can.
+func (c *Connection) SetSisterLastFrameAge(age time.Duration) {
+	c.evidenceMu.Lock()
+	c.evidence.SisterLastFrameAge = age
+	c.evidenceMu.Unlock()
+}
+
 // TerminalError reports the last error the connection produced, retained even when the watcher
 // channel was full.
 func (c *Connection) TerminalError() error {
@@ -495,8 +523,18 @@ func closeCodeOf(err error) (int, string) {
 func (c *Connection) stopWith(initiator string, err error) {
 	c.closeOnce.Do(func() {
 		code, reason := closeCodeOf(err)
+		dialAge := time.Duration(0)
+		if dialedAt := c.dialedAtMs.Load(); dialedAt > 0 {
+			dialAge = time.Since(time.UnixMilli(dialedAt))
+		}
 		c.evidenceMu.Lock()
-		c.evidence = CloseEvidence{Code: code, Reason: reason, Initiator: initiator}
+		c.evidence = CloseEvidence{
+			Code:      code,
+			Reason:    reason,
+			Initiator: initiator,
+			DialAge:   dialAge,
+			Streams:   int(c.streams.Load()),
+		}
 		c.evidenceMu.Unlock()
 		c.connected.Store(false)
 		c.closed.Store(true)

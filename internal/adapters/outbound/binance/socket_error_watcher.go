@@ -22,7 +22,7 @@ func (c *SDKClient) startSocketErrorWatchers(connCtx context.Context, clients []
 			// The partition identity travels in the callback, so the reconnect can heal ONE socket
 			// instead of closing the healthy sister for this one's fault.
 			watchTransportError(connCtx, partitionID, connection, marketTypeFuture, c.metrics, c.netdiag,
-				func(reason string) { c.requestReconnect(partitionID, reason) }, c.log)
+				func(reason string) { c.requestReconnect(partitionID, reason) }, c.log, nil)
 		}(pid, conn)
 	}
 }
@@ -35,7 +35,7 @@ func (c *SpotSDKClient) startSocketErrorWatchers(connCtx context.Context, client
 		c.connWg.Add(1)
 		go func(partitionID int, connection *binancews.Connection) {
 			defer c.connWg.Done()
-			watchTransportError(connCtx, partitionID, connection, marketTypeSpot, c.metrics, c.netdiag, c.requestReconnect, c.log)
+			watchTransportError(connCtx, partitionID, connection, marketTypeSpot, c.metrics, c.netdiag, c.requestReconnect, c.log, nil)
 		}(pid, conn)
 	}
 }
@@ -51,11 +51,12 @@ func watchTransportError(
 	correlator *netdiag.Correlator,
 	requestReconnect func(string),
 	log *slog.Logger,
+	sisterAge func() time.Duration,
 ) {
 	select {
 	case err, ok := <-conn.Errors():
 		if ok && err != nil {
-			recordTransportError(connCtx, partitionID, conn, market, metrics, correlator, err, requestReconnect, log)
+			recordTransportError(connCtx, partitionID, conn, market, metrics, correlator, err, requestReconnect, log, sisterAge)
 		}
 	case <-conn.Done():
 		// Done and Errors can become ready in the same instant. Prefer the
@@ -63,7 +64,7 @@ func watchTransportError(
 		select {
 		case err, ok := <-conn.Errors():
 			if ok && err != nil {
-				recordTransportError(connCtx, partitionID, conn, market, metrics, correlator, err, requestReconnect, log)
+				recordTransportError(connCtx, partitionID, conn, market, metrics, correlator, err, requestReconnect, log, sisterAge)
 			}
 		default:
 		}
@@ -82,6 +83,7 @@ func recordTransportError(
 	err error,
 	requestReconnect func(string),
 	log *slog.Logger,
+	sisterAge func() time.Duration,
 ) {
 	if connCtx.Err() != nil {
 		return
@@ -97,6 +99,13 @@ func recordTransportError(
 	// and whether WE closed it are the only facts that can assign blame.
 	var evidence binancews.CloseEvidence
 	if conn != nil {
+		// The sibling's age is the one fact the transport cannot know; the owner supplies it and
+		// it is stamped into the retained evidence before the log reads it.
+		if sisterAge != nil {
+			if age := sisterAge(); age > 0 {
+				conn.SetSisterLastFrameAge(age)
+			}
+		}
 		evidence = conn.CloseEvidence()
 	}
 	logger.OrDiscard(log).Warn("binance ws: partition socket error; triggering immediate reconnect",
@@ -106,6 +115,9 @@ func recordTransportError(
 		"close_code", evidence.Code,
 		"close_reason", evidence.Reason,
 		"close_initiator", evidence.Initiator,
+		"dial_age_ms", evidence.DialAge.Milliseconds(),
+		"streams", evidence.Streams,
+		"sister_last_frame_age_ms", evidence.SisterLastFrameAge.Milliseconds(),
 		"scope", scope,
 		"error", err)
 	requestReconnect(fmt.Sprintf("partition %d socket %s/%s", partitionID, cause, scope))
