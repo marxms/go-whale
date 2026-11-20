@@ -91,10 +91,14 @@ type KlineFeed struct {
 	framed          atomic.Bool
 	configFaultOnce sync.Once
 
-	mu      sync.Mutex
-	parts   []*klinePartition
-	metrics Metrics
-	log     *slog.Logger
+	mu    sync.Mutex
+	parts []*klinePartition
+	// nextPartitionID is monotonic and never reused. It identifies ONE live connection for the
+	// watchdog and the per-partition metrics; the old dialAt base of 0 made the discovery
+	// connection share id 0 with the first Start partition, so the watchdog could remove a sister.
+	nextPartitionID atomic.Int64
+	metrics         Metrics
+	log             *slog.Logger
 	// wsBasePath is resolved at construction; tests may override it.
 	wsBasePath string
 	// netdiag correlates this feed's disconnects with the trade transports.
@@ -427,9 +431,13 @@ func (f *KlineFeed) SilentPartition(limitSeconds float64) (PartitionStat, []stri
 
 // RestartPartition closes ONE partition and re-dials only its members.
 //
-// The sister keeps its connection, its counters and its clock: that is the difference between
-// healing a partition and resetting the fleet. On a dial failure the feed latches terminal, so the
-// owner falls back to the fleet restart instead of leaving those symbols with no producer.
+// The id identifies ONE live connection and is unique for the life of the feed. The sister keeps
+// its connection, its counters and its clock. The victim is matched by the id and removed by
+// identity; if two live partitions ever share an id the call refuses instead of guessing, because
+// guessing is exactly what removed a sister in production. The re-dialed partitions receive fresh
+// ids, never the victim's, so a later restart cannot alias this one. On a dial failure the feed
+// latches terminal, so the owner falls back to the fleet restart instead of leaving those symbols
+// with no producer.
 func (f *KlineFeed) RestartPartition(id int) error {
 	f.opMu.Lock()
 	defer f.opMu.Unlock()
@@ -439,17 +447,25 @@ func (f *KlineFeed) RestartPartition(id int) error {
 
 	f.mu.Lock()
 	var victim *klinePartition
-	kept := make([]*klinePartition, 0, len(f.parts))
 	for _, p := range f.parts {
-		if victim == nil && p.client != nil && p.client.ID == id {
-			victim = p
+		if p.client == nil || p.client.ID != id {
 			continue
 		}
-		kept = append(kept, p)
+		if victim != nil {
+			f.mu.Unlock()
+			return fmt.Errorf("kline partition id %d is not unique among %d live partitions; refusing to remove the wrong one", id, len(f.parts))
+		}
+		victim = p
 	}
 	if victim == nil {
 		f.mu.Unlock()
 		return fmt.Errorf("kline partition %d is not live", id)
+	}
+	kept := make([]*klinePartition, 0, len(f.parts)-1)
+	for _, p := range f.parts {
+		if p != victim {
+			kept = append(kept, p)
+		}
 	}
 	f.parts = kept
 	members := append([]string(nil), victim.members...)
@@ -465,7 +481,7 @@ func (f *KlineFeed) RestartPartition(id int) error {
 		return nil
 	}
 
-	opened, attached, err := f.dialAt(members, id)
+	opened, attached, err := f.dial(members)
 	if err != nil {
 		f.terminal.Store(true)
 		return err
@@ -619,13 +635,6 @@ func (f *KlineFeed) registerMembership(parts []*klinePartition) {
 // silently fail to reach any symbol discovery had added. Sharing one receiver removes the class
 // rather than patching this instance of it.
 func (f *KlineFeed) dial(symbols []string) ([]*klinePartition, int, error) {
-	return f.dialAt(symbols, 0)
-}
-
-// dialAt is dial with an explicit id base, so a partition-scoped redial keeps the id it had. The
-// id is what PartitionStat and the per-partition metrics carry, so reusing it keeps one
-// partition's history continuous across its own restart instead of aliasing a sister.
-func (f *KlineFeed) dialAt(symbols []string, baseID int) ([]*klinePartition, int, error) {
 	if len(symbols) == 0 {
 		return nil, 0, nil
 	}
@@ -636,7 +645,7 @@ func (f *KlineFeed) dialAt(symbols []string, baseID int) ([]*klinePartition, int
 	attached := 0
 	off := 0
 	for i, slice := range parts {
-		id := baseID + i
+		id := f.newPartitionID()
 		ctx, cancel := context.WithCancel(f.ctx)
 		ws := binancews.NewConnection(id, f.wsBasePath,
 			binancews.WithRoute(routeFor(f.exchange, f.marketType, streamClassKline)),
@@ -697,6 +706,9 @@ func (f *KlineFeed) dialAt(symbols []string, baseID int) ([]*klinePartition, int
 		"stream_class", streamClassKline)
 	return opened, attached, nil
 }
+
+// newPartitionID returns the next id for a live connection. Monotonic, never reused.
+func (f *KlineFeed) newPartitionID() int { return int(f.nextPartitionID.Add(1)) }
 
 // reportAttached publishes the gauge and says so out loud when a symbol ended up with no producer.
 //
