@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -288,8 +289,20 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Name: "realtime_publish_dropped_total",
 		Help: "Realtime events discarded because the outbound queue was full, by channel. >0 means the bus could not keep up and subscribers will detect a sequence gap and rehydrate.",
 	}, []string{"channel"})
+	realtimeQueueDepth := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "realtime_queue_depth",
+		Help: "Events waiting in the outbound queue, by channel. A rising depth is the bus falling behind; it is not a drop yet.",
+	}, []string{"channel"})
+	realtimeOldestPendingAge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "realtime_oldest_pending_age_seconds",
+		Help: "Age of the oldest event still pending in the outbound queue, by channel. It updates on traffic and is an upper bound when the head was just consumed.",
+	}, []string{"channel"})
 	p.realtime = realtime.Metrics{
-		PublishDropped: func(channel string) { realtimeDropped.WithLabelValues(channel).Inc() },
+		PublishDropped:    func(channel string) { realtimeDropped.WithLabelValues(channel).Inc() },
+		PublishQueueDepth: func(channel string, depth int) { realtimeQueueDepth.WithLabelValues(channel).Set(float64(depth)) },
+		PublishOldestPendingAge: func(channel string, age time.Duration) {
+			realtimeOldestPendingAge.WithLabelValues(channel).Set(age.Seconds())
+		},
 	}
 
 	// Coverage gauges updated by the health aggregation.
@@ -740,7 +753,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		resubscribeUnverified, dynamicSubscribeDeferred, starvationSuppressed,
 		klineFramesTotal, klineFramesRejected, klineSymbolsAttached, klinePartitionFrames, klineRoute,
 		// ── Realtime ─────────────────────────────────────────────────────
-		realtimeDropped,
+		realtimeDropped, realtimeQueueDepth, realtimeOldestPendingAge,
 		// ── Coverage ──────────────────────────────────────────────────────
 		symbolsConfigured, symbolsEffective,
 		// ── Derivatives adapters ──────────────────────────────────────────

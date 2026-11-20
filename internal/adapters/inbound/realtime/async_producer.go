@@ -32,10 +32,12 @@ func NewAsyncProducer(pub Publisher, prefix string, clock func() int64, opts ...
 func NewAsyncProducerWithLogger(pub Publisher, prefix string, clock func() int64, metrics Metrics, log *slog.Logger, opts ...AsyncProducerOption) *AsyncProducer {
 	h := realtimeProducerHooks{metrics: metrics, log: logger.OrDiscard(log)}
 	opts = append([]AsyncProducerOption{distribution.WithHooks(distribution.ProducerHooks{
-		OnDrop:         h.OnDrop,
-		OnPublishError: h.OnPublishError,
-		OnMarshalError: h.OnMarshalError,
-		OnDrainTimeout: h.OnDrainTimeout,
+		OnDrop:             h.OnDrop,
+		OnPublishError:     h.OnPublishError,
+		OnMarshalError:     h.OnMarshalError,
+		OnDrainTimeout:     h.OnDrainTimeout,
+		OnQueueDepth:       h.OnQueueDepth,
+		OnOldestPendingAge: h.OnOldestPendingAge,
 	})}, opts...)
 	return distribution.NewAsyncProducer(pub, prefix, clock, opts...)
 }
@@ -65,4 +67,12 @@ func (h realtimeProducerHooks) OnMarshalError(typ distribution.EventType, err er
 func (h realtimeProducerHooks) OnDrainTimeout(timeout time.Duration) {
 	logger.OrDiscard(h.log).Warn("realtime: outbound drain timed out at shutdown; abandoning the queued tail",
 		"timeout", timeout)
+}
+
+func (h realtimeProducerHooks) OnQueueDepth(channel string, depth int) {
+	h.metrics.publishQueueDepth(channel, depth)
+}
+
+func (h realtimeProducerHooks) OnOldestPendingAge(channel string, age time.Duration) {
+	h.metrics.publishOldestPendingAge(channel, age)
 }
