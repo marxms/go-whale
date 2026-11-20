@@ -74,3 +74,55 @@ func TestRestartPartitionRefusesADuplicateID(t *testing.T) {
 		t.Fatalf("a refused restart removed a partition: parts = %d, want 2", len(feed.parts))
 	}
 }
+
+// The victim's id is free after removal, so the first re-dialed partition reuses it. That keeps
+// the per-partition metric series continuous across a scoped restart; a split part gets a fresh id.
+func TestRestartPartitionKeepsTheVictimIDAndFullMembership(t *testing.T) {
+	server, _ := newMarketWSServer(t, func(conn *websocket.Conn, _ *http.Request, _ int) {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	feed := NewKlineFeed(context.Background(), "binance", "future", "5m", func(string, candle.Candle) {})
+	feed.wsBasePath = wsServerURL(server)
+	defer feed.Stop()
+
+	symbols := make([]string, 0, 320)
+	for i := 0; i < 320; i++ {
+		symbols = append(symbols, fmt.Sprintf("TEST%04d/USDT", i))
+	}
+	if err := feed.Start(symbols); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	feed.mu.Lock()
+	victim := feed.parts[0]
+	if len(feed.parts[1].members) > len(victim.members) {
+		victim = feed.parts[1]
+	}
+	victimID := victim.client.ID
+	victimMembers := append([]string(nil), victim.members...)
+	feed.mu.Unlock()
+
+	if err := feed.RestartPartition(victimID); err != nil {
+		t.Fatalf("RestartPartition: %v", err)
+	}
+
+	feed.mu.Lock()
+	defer feed.mu.Unlock()
+	for _, symbol := range victimMembers {
+		p, ok := feed.membership[symbol]
+		if !ok || p == nil {
+			t.Fatalf("symbol %s has no partition after the restart", symbol)
+		}
+		if p.client.ID != victimID {
+			t.Fatalf("symbol %s landed on id %d, want the victim id %d", symbol, p.client.ID, victimID)
+		}
+	}
+	newPart := feed.membership[victimMembers[0]]
+	if len(newPart.members) != len(victimMembers) {
+		t.Fatalf("re-dialed membership = %d, want the victim's %d", len(newPart.members), len(victimMembers))
+	}
+}

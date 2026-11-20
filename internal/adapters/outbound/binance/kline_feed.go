@@ -434,8 +434,8 @@ func (f *KlineFeed) SilentPartition(limitSeconds float64) (PartitionStat, []stri
 // The id identifies ONE live connection and is unique for the life of the feed. The sister keeps
 // its connection, its counters and its clock. The victim is matched by the id and removed by
 // identity; if two live partitions ever share an id the call refuses instead of guessing, because
-// guessing is exactly what removed a sister in production. The re-dialed partitions receive fresh
-// ids, never the victim's, so a later restart cannot alias this one. On a dial failure the feed
+// guessing is exactly what removed a sister in production. The first re-dialed partition keeps the victim's id
+// (now free); any additional split part gets a fresh id, so no live connection shares an id. On a dial failure the feed
 // latches terminal, so the owner falls back to the fleet restart instead of leaving those symbols
 // with no producer.
 func (f *KlineFeed) RestartPartition(id int) error {
@@ -481,7 +481,7 @@ func (f *KlineFeed) RestartPartition(id int) error {
 		return nil
 	}
 
-	opened, attached, err := f.dial(members)
+	opened, attached, err := f.dial(members, id)
 	if err != nil {
 		f.terminal.Store(true)
 		return err
@@ -533,7 +533,7 @@ func (f *KlineFeed) Start(symbols []string) error {
 	f.framed.Store(false)
 	f.configFaultOnce = sync.Once{}
 	symbols = uniqueKlineSymbols(symbols)
-	parts, attached, err := f.dial(symbols)
+	parts, attached, err := f.dial(symbols, 0)
 	if err != nil {
 		f.terminal.Store(true)
 		f.reportAttached(0, 0)
@@ -587,7 +587,7 @@ func (f *KlineFeed) AddSymbols(symbols []string) error {
 			return fmt.Errorf("kline symbol %s needs feed restart", symbol)
 		}
 	}
-	parts, attached, err := f.dial(missing)
+	parts, attached, err := f.dial(missing, 0)
 	if err != nil {
 		f.terminal.Store(true)
 		f.reportAttached(0, 0)
@@ -634,7 +634,7 @@ func (f *KlineFeed) registerMembership(parts []*klinePartition) {
 // symbols could be deranked, its own mute set — so muting a symbol on the real feed would
 // silently fail to reach any symbol discovery had added. Sharing one receiver removes the class
 // rather than patching this instance of it.
-func (f *KlineFeed) dial(symbols []string) ([]*klinePartition, int, error) {
+func (f *KlineFeed) dial(symbols []string, preferredID int) ([]*klinePartition, int, error) {
 	if len(symbols) == 0 {
 		return nil, 0, nil
 	}
@@ -646,6 +646,9 @@ func (f *KlineFeed) dial(symbols []string) ([]*klinePartition, int, error) {
 	off := 0
 	for i, slice := range parts {
 		id := f.newPartitionID()
+		if i == 0 && preferredID > 0 {
+			id = preferredID
+		}
 		ctx, cancel := context.WithCancel(f.ctx)
 		ws := binancews.NewConnection(id, f.wsBasePath,
 			binancews.WithRoute(routeFor(f.exchange, f.marketType, streamClassKline)),
