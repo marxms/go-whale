@@ -21,6 +21,7 @@ func (a *App) buildHTTP(cfg config.Config, tfReg *candle.TimeframeRegistry, metr
 	// One row per feed partition: the row is what distinguishes a silent partition from a dead
 	// fleet without reading the process's sockets.
 	a.metricsCollector.SetPartitions(a.partitionHealth)
+	a.metricsCollector.SetFeedReconnectExhausted(a.klineReconnectExhaustedProbe)
 
 	// The per-TIMEFRAME data age. Without it a derived timeframe can freeze under a live 5m while
 	// /health keeps saying healthy.

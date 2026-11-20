@@ -160,6 +160,17 @@ func (a *App) sampleFleetLivenessFromConfig(ctx context.Context, provider recove
 	)
 }
 
+// klineReconnectExhaustedProbe reports whether the bounded redial gave up. A feed that stopped
+// retrying has no candle producer, so the health verdict must not read it as merely quiet.
+func (a *App) klineReconnectExhaustedProbe() (bool, bool) {
+	a.klineMu.Lock()
+	defer a.klineMu.Unlock()
+	if a.klineFeed == nil && a.klineScope == "" {
+		return false, false
+	}
+	return a.klineReconnectExhausted, true
+}
+
 // silentPartitionVerdict reports the ONE silent partition whose symbols exceed the declared
 // fraction of the monitored fleet. SilentPartition already refuses to blame a partition when
 // no sister is fresh (or when every partition is silent), so this verdict only ever names a

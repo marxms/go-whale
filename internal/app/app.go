@@ -68,6 +68,9 @@ type App struct {
 	klineFailures     int
 	klineHealthySince time.Time
 	klineNextAttempt  time.Time
+	// klineReconnectExhausted is terminal: the bounded attempts are spent and the watchdog stopped
+	// redialing. The health probe publishes it so a silent scope is not mistaken for a quiet one.
+	klineReconnectExhausted bool
 	// klinePendingAttach holds symbols a previous attach failed on: already subscribed and
 	// seeded, so no later discovery cycle classifies them as new.
 	klinePendingAttach []string

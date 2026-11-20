@@ -204,6 +204,9 @@ type Probes struct {
 	// monitored fleet while a sister stayed fresh. A non-empty list makes the process
 	// unhealthy after the startup grace, naming the partition and the silent count.
 	SilentPartitions func() ([]SilentPartitionReport, bool)
+	// FeedReconnectExhausted reports that the bounded redial stopped. A feed with no producer
+	// is unhealthy after the grace: retrying forever was the loop this bound removes.
+	FeedReconnectExhausted func() (bool, bool)
 	// ExpectedScopes returns the canonical scopes that MUST be live after the grace.
 	ExpectedScopes func() ([]string, bool)
 	// LivenessFailing returns scopes whose per-symbol fleet liveness is below threshold.
@@ -241,16 +244,18 @@ type Report struct {
 	Uptime     string
 	Goroutines int
 
-	Connections        []ConnectionSummary
-	Partitions         []PartitionHealth
-	SilentPartitions   []SilentPartitionReport
-	DerivativesPoller  bool
-	TimeframeChecksum  string
-	MissingScopes      []string
-	StaleScopes        []string
-	CandleFreshness    []CandleFreshnessReport
-	TimeframeFreshness []TimeframeFreshnessReport
-	CoverageDeficits   []string
+	Connections      []ConnectionSummary
+	Partitions       []PartitionHealth
+	SilentPartitions []SilentPartitionReport
+	// FeedReconnectExhausted is true when automatic redial gave up; the scope has no producer.
+	FeedReconnectExhausted bool
+	DerivativesPoller      bool
+	TimeframeChecksum      string
+	MissingScopes          []string
+	StaleScopes            []string
+	CandleFreshness        []CandleFreshnessReport
+	TimeframeFreshness     []TimeframeFreshnessReport
+	CoverageDeficits       []string
 
 	ColdWriteAgeSeconds *int64
 	ColdWriteStale      bool
@@ -413,11 +418,22 @@ func (a *Aggregator) Evaluate() Report {
 			httpStatus = 503
 		}
 	}
+	reconnectExhausted := false
+	exhaustedConfigured := false
+	if a.probes.FeedReconnectExhausted != nil {
+		reconnectExhausted, exhaustedConfigured = a.probes.FeedReconnectExhausted()
+		if exhaustedConfigured && reconnectExhausted && elapsed > StartupGrace {
+			status = statusUnhealthy
+			httpStatus = 503
+		}
+	}
 	switch {
-	case !livenessConfigured && !silentConfigured:
+	case !livenessConfigured && !silentConfigured && !exhaustedConfigured:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentAbsent, Reason: reasonNotConfigured})
 	case elapsed <= StartupGrace:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentStarting, Reason: reasonStartupGrace})
+	case reconnectExhausted:
+		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentUnhealthy, Reason: "reconnect exhausted: no automatic redial"})
 	case len(staleScopes) > 0:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentUnhealthy, Reason: fmt.Sprintf("%d stale scope(s)", len(staleScopes))})
 	case len(silentPartitions) > 0:
@@ -655,25 +671,26 @@ func (a *Aggregator) Evaluate() Report {
 	}
 
 	return Report{
-		Status:              status,
-		HTTPStatus:          httpStatus,
-		Uptime:              now.Sub(start).Round(time.Second).String(),
-		Goroutines:          runtime.NumGoroutine(),
-		Connections:         summaries,
-		Partitions:          partitions,
-		SilentPartitions:    silentPartitions,
-		DerivativesPoller:   derivPoller,
-		TimeframeChecksum:   checksum,
-		MissingScopes:       missingScopes,
-		StaleScopes:         staleScopes,
-		CandleFreshness:     candleFreshness,
-		TimeframeFreshness:  timeframeFreshness,
-		CoverageDeficits:    deficits,
-		ColdWriteAgeSeconds: coldAge,
-		ColdWriteStale:      coldStale,
-		GCHeadroomRatio:     gcRatio,
-		GCHeadroomTight:     gcTight,
-		Components:          components,
+		Status:                 status,
+		HTTPStatus:             httpStatus,
+		Uptime:                 now.Sub(start).Round(time.Second).String(),
+		Goroutines:             runtime.NumGoroutine(),
+		Connections:            summaries,
+		Partitions:             partitions,
+		SilentPartitions:       silentPartitions,
+		FeedReconnectExhausted: reconnectExhausted,
+		DerivativesPoller:      derivPoller,
+		TimeframeChecksum:      checksum,
+		MissingScopes:          missingScopes,
+		StaleScopes:            staleScopes,
+		CandleFreshness:        candleFreshness,
+		TimeframeFreshness:     timeframeFreshness,
+		CoverageDeficits:       deficits,
+		ColdWriteAgeSeconds:    coldAge,
+		ColdWriteStale:         coldStale,
+		GCHeadroomRatio:        gcRatio,
+		GCHeadroomTight:        gcTight,
+		Components:             components,
 	}
 }
 

@@ -172,12 +172,29 @@ func (a *App) noteKlineHealthy() {
 	}
 	if a.klineBackoffPolicy().Stable(now.Sub(a.klineHealthySince)) {
 		a.klineFailures = 0
+		a.klineReconnectExhausted = false
 	}
 }
 
+// Bounded redial for the kline feed. The 30s watchdog tick is the OBSERVATION cadence; the redial
+// itself backs off from 1s to 30s with full jitter and stops after a declared number of attempts,
+// so a persistent dial failure becomes a named terminal state instead of an endless loop.
+const (
+	klineReconnectBase = time.Second
+	klineReconnectCap  = 30 * time.Second
+	// Six attempts reach the cap (1+2+4+8+16+30 ≈ 61s of waiting). Past it the feed is terminal
+	// and an operator/supervisor decides; retrying forever at a fixed cadence is exactly the loop
+	// this bound removes.
+	klineMaxReconnectAttempts = 6
+)
+
 func (a *App) klineBackoffPolicy() binancews.Backoff {
 	if a.klineBackoff == (binancews.Backoff{}) {
-		return binancews.DefaultBackoff()
+		return binancews.Backoff{
+			Base:        klineReconnectBase,
+			Max:         klineReconnectCap,
+			StableAfter: 30 * time.Second,
+		}
 	}
 	return a.klineBackoff
 }
@@ -251,8 +268,20 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 		return false
 	}
 	now := time.Now()
+	if a.klineReconnectExhausted {
+		return true
+	}
 	if now.Before(a.klineNextAttempt) {
 		return false
+	}
+	if a.klineFailures >= klineMaxReconnectAttempts {
+		a.klineReconnectExhausted = true
+		a.logger().Error("kline feed: reconnect exhausted; automatic redial stopped",
+			"attempts", a.klineFailures,
+			"exchange", exchangeID,
+			"market_type", marketType,
+			"symbols", len(a.klineSymbols)+len(a.klinePendingAttach))
+		return true
 	}
 	a.klineHealthySince = time.Time{}
 	//nolint:gosec // G404: reconnect jitter, not a cryptographic use.
