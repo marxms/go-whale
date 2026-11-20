@@ -82,6 +82,14 @@ func (a *App) shutdown(ctx context.Context) error {
 				"pending", pending, "evicted_scopes", evicted)
 		}
 	}
+	if a.hotWriter != nil {
+		stopCtx, cancel := context.WithTimeout(shutdownCtx, 10*time.Second)
+		if err := a.hotWriter.Stop(stopCtx); err != nil {
+			a.logger().Warn("hot writer stop error", "error", err)
+			errs = append(errs, fmt.Errorf("hot writer stop: %w", err))
+		}
+		cancel()
+	}
 	if a.qdbPipeline != nil {
 		a.qdbPipeline.Stop(shutdownCtx)
 	}

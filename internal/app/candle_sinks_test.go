@@ -1,6 +1,9 @@
 package app
 
 import (
+	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +12,26 @@ import (
 	"github.com/marxms/go-whale/internal/candle"
 	"github.com/marxms/go-whale/internal/candle/engine"
 )
+
+type recordingHotWriter struct {
+	keys []engine.CompositeKey
+}
+
+func (r *recordingHotWriter) Enqueue(key engine.CompositeKey, _ candle.Candle) bool {
+	r.keys = append(r.keys, key)
+	return true
+}
+
+func (r *recordingHotWriter) Stop(context.Context) error { return nil }
+
+type recordingPublisher struct {
+	channels []string
+}
+
+func (p *recordingPublisher) Publish(_ context.Context, channel string, _ []byte) error {
+	p.channels = append(p.channels, channel)
+	return nil
+}
 
 func TestSeedRevisionFanoutDoesNotEnqueueColdTwice(t *testing.T) {
 	p := questdb.NewPipeline(nil, 8, time.Hour)
@@ -126,4 +149,52 @@ func TestOnCandleClose_NilSinksAreAllIndividuallySafe(t *testing.T) {
 	// This must be a complete no-op rather than a panic on the trade-processing goroutine.
 	a.onCandleClose(key, c)
 	a.onCandleRevised(key, c)
+}
+
+// The close path hands the hot write to the owner instead of writing Redis on the reader.
+func TestOnCandleCloseEnqueuesHotWrite(t *testing.T) {
+	t.Parallel()
+
+	hot := &recordingHotWriter{}
+	a := &App{hotWriter: hot}
+	key := engine.CompositeKey{Exchange: "binance", MarketType: "future", Symbol: "BTC/USDT", Timeframe: "5m"}
+	closed := candle.Candle{Timestamp: 1_700_000_000_000, Close: 100, Volume: 10}
+
+	a.onCandleClose(key, closed)
+
+	if len(hot.keys) != 1 || hot.keys[0] != key {
+		t.Fatalf("hot writes = %v, want the closed key %v", hot.keys, key)
+	}
+}
+
+// A correction travels the revised lane and never re-emits a close for the same bar.
+func TestOnCandleRevisedDoesNotReemitClose(t *testing.T) {
+	t.Parallel()
+
+	published := &recordingPublisher{}
+	producer := realtime.NewAsyncProducerWithLogger(
+		published,
+		"test",
+		func() int64 { return time.Now().UnixMilli() },
+		realtime.Metrics{},
+		slog.Default(),
+	)
+	a := &App{realtimeProducer: producer}
+	key := engine.CompositeKey{Exchange: "binance", MarketType: "future", Symbol: "BTC/USDT", Timeframe: "5m"}
+	revised := candle.Candle{Timestamp: 1_700_000_000_000, Close: 100, Volume: 279.983}
+
+	a.onCandleRevised(key, revised)
+	producer.Stop()
+
+	if len(published.channels) == 0 {
+		t.Fatal("the revision was not published")
+	}
+	for _, channel := range published.channels {
+		if strings.Contains(channel, "candle.close") {
+			t.Fatalf("the revision re-emitted a close on %q", channel)
+		}
+		if !strings.Contains(channel, "candle.revised") {
+			t.Fatalf("unexpected channel %q; want candle.revised", channel)
+		}
+	}
 }

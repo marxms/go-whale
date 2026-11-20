@@ -1,10 +1,18 @@
 package app
 
 import (
+	"context"
+
 	"github.com/marxms/go-whale/internal/adapters/inbound/realtime"
 	"github.com/marxms/go-whale/internal/candle"
 	"github.com/marxms/go-whale/internal/candle/engine"
 )
+
+// hotWriter is the reader's non-blocking hand-off to the single hot-write owner.
+type hotWriter interface {
+	Enqueue(key engine.CompositeKey, c candle.Candle) bool
+	Stop(ctx context.Context) error
+}
 
 // continuityTracker returns the process-lifetime continuity tracker, creating it
 // lazily when a test builds an App literal. Production initializes it in NewApp.
@@ -50,8 +58,8 @@ func (a *App) onCandleClose(key engine.CompositeKey, closed candle.Candle) {
 	// never reached Redis and the hot copy froze at the last snapshot. Measured across 15
 	// buckets on 5 symbols: 9 under-reported, 6 exact, ZERO over-reported, with the deficit
 	// scaling with trade rate (BTC/USDT reached -8,85%).
-	if a.tieredStore != nil {
-		a.tieredStore.WriteClosedToHot(key, closed)
+	if a.hotWriter != nil {
+		a.hotWriter.Enqueue(key, closed)
 	}
 
 	// Ingest-time open-time continuity → targeted backfill. Detects a missing bucket in the
@@ -110,8 +118,8 @@ func (a *App) onCandleRevised(key engine.CompositeKey, revised candle.Candle) {
 // Seed admission uses its own cancellable cold path; this fanout must not
 // enqueue a second copy that could overtake the retained repair.
 func (a *App) onSeedCandleRevised(key engine.CompositeKey, revised candle.Candle) {
-	if a.tieredStore != nil {
-		a.tieredStore.WriteClosedToHot(key, revised)
+	if a.hotWriter != nil {
+		a.hotWriter.Enqueue(key, revised)
 	}
 
 	scope := realtime.Scope{

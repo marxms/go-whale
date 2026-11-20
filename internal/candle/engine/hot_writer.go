@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	redisstore "github.com/marxms/go-whale/internal/adapters/outbound/redis"
 	"github.com/marxms/go-whale/internal/candle"
 )
 
@@ -220,4 +221,21 @@ func (w *HotWriter) flushPending(ctx context.Context) {
 	if err != nil {
 		w.failed.Add(1)
 	}
+}
+
+// NewHotWriter builds a writer whose flush is the store's own snapshot batch. The writeThrough
+// guard keeps a disabled hot tier a no-op instead of an error on every close.
+func (ts *TieredStore) NewHotWriter(opts ...HotWriterOption) *HotWriter {
+	return NewHotWriter(func(parent context.Context, entries []hotWrite) error {
+		if !ts.writeThrough || ts.redis == nil || len(entries) == 0 {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+		defer cancel()
+		updates := make([]redisstore.CandleUpdate, 0, len(entries))
+		for _, entry := range entries {
+			updates = append(updates, buildSnapshotUpdate(entry.key, entry.candle))
+		}
+		return ts.redis.WriteSnapshotBatch(ctx, updates)
+	}, opts...)
 }

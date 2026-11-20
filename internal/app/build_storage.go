@@ -76,6 +76,7 @@ func (a *App) buildStorage(cfg config.Config, tfReg *candle.TimeframeRegistry, m
 		a.candleEngine.SetMetrics(a.engineMetrics)
 		a.tieredStore = engine.NewTieredStore(a.candleEngine, redisStore, cfg.CandleEngine, a.log)
 		a.tieredStore.SetMetrics(a.engineMetrics)
+		a.hotWriter = a.tieredStore.NewHotWriter()
 		store.Writer = a.tieredStore
 		store.Reader = a.tieredStore
 		store.Catalog = a.tieredStore

@@ -87,6 +87,7 @@ type App struct {
 	serverProbe  redisstore.RedisServerProbe
 	store        *redisstore.CombinedStore
 	tieredStore  *engine.TieredStore
+	hotWriter    hotWriter
 	candleEngine *engine.CandleEngine
 	qdbPipeline  *questdb.Pipeline
 	qdbStore     *questdb.Store

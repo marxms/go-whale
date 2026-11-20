@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,5 +128,86 @@ func TestHotWriterRecordsDropAndOldestPending(t *testing.T) {
 	}
 	if stats.OldestPendingAge <= 0 {
 		t.Fatalf("oldest pending age = %v, want > 0", stats.OldestPendingAge)
+	}
+}
+
+// The reader keeps producing frames while the hot owner is blocked on Redis: the counter and the
+// last-frame clock advance, because Enqueue never waits for the flush.
+func TestRedisStallDoesNotChangeFramesOrLastFrameAge(t *testing.T) {
+	release := make(chan struct{})
+	writer := NewHotWriter(
+		func(ctx context.Context, _ []hotWrite) error {
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+		WithHotWriterInterval(time.Millisecond),
+	)
+	defer func() {
+		close(release)
+		_ = writer.Stop(context.Background())
+	}()
+
+	var frames atomic.Int64
+	var lastFrameAt atomic.Int64
+	lastFrameAt.Store(time.Now().UnixMilli())
+	for i := 0; i < 200; i++ {
+		frames.Add(1)
+		lastFrameAt.Store(time.Now().UnixMilli())
+		if !writer.Enqueue(hotWriterKey(fmt.Sprintf("STALL%03d", i)), candle.Candle{Close: float64(i)}) {
+			t.Fatalf("enqueue %d was dropped below the capacity", i)
+		}
+	}
+	if frames.Load() != 200 {
+		t.Fatalf("frames = %d, want 200", frames.Load())
+	}
+	if age := time.Since(time.UnixMilli(lastFrameAt.Load())); age > time.Second {
+		t.Fatalf("last frame age = %v; the reader stalled on the flush", age)
+	}
+}
+
+// Liveness is independent of the queue's age: while the oldest pending entry grows, the last
+// frame stays recent. The hot tier is best-effort; Redis latency is not a partition property.
+func TestRedisStallKeepsLivenessIndependent(t *testing.T) {
+	release := make(chan struct{})
+	writer := NewHotWriter(
+		func(ctx context.Context, _ []hotWrite) error {
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+		WithHotWriterInterval(time.Millisecond),
+	)
+	defer func() {
+		close(release)
+		_ = writer.Stop(context.Background())
+	}()
+
+	var lastFrameAt atomic.Int64
+	for i := 0; i < 200; i++ {
+		if i == 1 {
+			// Separate the oldest pending entry from the newest frame below the 1 ms clock
+			// resolution, so the two ages cannot collapse into the same millisecond.
+			time.Sleep(2 * time.Millisecond)
+		}
+		lastFrameAt.Store(time.Now().UnixMilli())
+		if !writer.Enqueue(hotWriterKey(fmt.Sprintf("LIVE%03d", i)), candle.Candle{Close: float64(i)}) {
+			t.Fatalf("enqueue %d was dropped below the capacity", i)
+		}
+	}
+	time.Sleep(2 * time.Millisecond)
+	pendingAge := writer.Stats().OldestPendingAge
+	livenessAge := time.Since(time.UnixMilli(lastFrameAt.Load()))
+	if pendingAge <= 0 {
+		t.Fatalf("pending age = %v; the queue did not retain the in-flight entry", pendingAge)
+	}
+	if livenessAge >= pendingAge {
+		t.Fatalf("liveness age = %v, pending age = %v; the Redis stall reached the reader", livenessAge, pendingAge)
 	}
 }
