@@ -2,8 +2,11 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/marxms/go-whale/internal/adapters/inbound/realtime"
+	"github.com/marxms/go-whale/internal/adapters/outbound/questdb"
 	"github.com/marxms/go-whale/internal/candle"
 	"github.com/marxms/go-whale/internal/candle/engine"
 )
@@ -50,7 +53,9 @@ func (a *App) onCandleClose(key engine.CompositeKey, closed candle.Candle) {
 	// Cold durability. Nil exactly when QuestDB is disabled or failed to start, which is the
 	// one degradation this function is allowed to have.
 	if a.qdbPipeline != nil {
-		a.qdbPipeline.Enqueue(key.Exchange, key.MarketType, key.Symbol, key.Timeframe, closed)
+		if admitted, id := a.qdbPipeline.Enqueue(key.Exchange, key.MarketType, key.Symbol, key.Timeframe, closed); !admitted {
+			a.markColdPending(id)
+		}
 	}
 
 	// Write the CLOSED bucket to the hot tier as well. The periodic snapshot only ever
@@ -110,7 +115,9 @@ func (a *App) onCandleClose(key engine.CompositeKey, closed candle.Candle) {
 // next genuine close look like a gap.
 func (a *App) onCandleRevised(key engine.CompositeKey, revised candle.Candle) {
 	if a.qdbPipeline != nil {
-		a.qdbPipeline.Enqueue(key.Exchange, key.MarketType, key.Symbol, key.Timeframe, revised)
+		if admitted, id := a.qdbPipeline.Enqueue(key.Exchange, key.MarketType, key.Symbol, key.Timeframe, revised); !admitted {
+			a.markColdPending(id)
+		}
 	}
 	a.onSeedCandleRevised(key, revised)
 }
@@ -136,5 +143,32 @@ func (a *App) onSeedCandleRevised(key engine.CompositeKey, revised candle.Candle
 	}
 	if a.hub != nil {
 		a.hub.IngestRevised(scope, revised)
+	}
+}
+
+const (
+	coldPendingTTL          = 24 * time.Hour
+	coldPendingWriteTimeout = 2 * time.Second
+)
+
+func coldPendingKey(id questdb.ColdID) string {
+	return fmt.Sprintf("cold:pending:%s:%s:%s:%s:%d",
+		id.Exchange, id.MarketType, id.Symbol, id.Timeframe, id.Timestamp)
+}
+
+// markColdPending declares the bar not-durable in the hot tier and asks the existing targeted
+// repair for the exact bucket. The repair is the authority; the marker keeps the refusal visible
+// until it is reconciled, so a cold copy is never reported complete by omission.
+func (a *App) markColdPending(id questdb.ColdID) {
+	if a.redisStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), coldPendingWriteTimeout)
+		if err := a.redisStore.Client().Set(ctx, coldPendingKey(id), "1", coldPendingTTL).Err(); err != nil {
+			a.logger().Warn("cold pipeline: failed to mark the refused candle",
+				"symbol", id.Symbol, "timeframe", id.Timeframe, "timestamp", id.Timestamp, "error", err)
+		}
+		cancel()
+	}
+	if a.gapRecovery != nil {
+		a.gapRecovery.EnqueueTargetedBucket(id.Exchange, id.MarketType, id.Symbol, id.Timeframe, id.Timestamp)
 	}
 }
