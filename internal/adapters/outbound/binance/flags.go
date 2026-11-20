@@ -13,6 +13,13 @@ const (
 	// combined-URL connection. 800 leaves headroom under Binance's 1024 limit.
 	maxStreamsPerConnection = 800
 
+	// maxKlineStreamsPerConnection caps @kline streams on one connection. It is a SEPARATE
+	// budget: the 200/250/300 experiment may show that kline tolerates fewer streams than
+	// aggTrade, and the venue's 1024 limit is per connection, not per stream class. Until the
+	// experiment measures a value, it stays equal to the aggTrade budget — promoting an
+	// unmeasured number is the defect this constant exists to prevent.
+	maxKlineStreamsPerConnection = maxStreamsPerConnection
+
 	// maxCombinedURLLength caps the total characters of the joined stream list
 	// (the "a@aggTrade/b@aggTrade/..." portion). ~6KB is comfortably below the
 	// practical request-line ceiling while ~500 symbols × ~15 chars ≈ 7.5KB, so
@@ -66,6 +73,12 @@ func streamName(symbol string) string {
 // never empty when streams is non-empty.
 func partitionStreams(streams []string) [][]string {
 	return partitionStreamsWithBudget(streams, maxStreamsPerConnection, maxCombinedURLLength)
+}
+
+// partitionKlineStreams is the kline feed's partitioner. It reads the kline budget, so the
+// experiment can change one value without touching the aggTrade path (or the reverse).
+func partitionKlineStreams(streams []string) [][]string {
+	return partitionStreamsWithBudget(streams, maxKlineStreamsPerConnection, maxCombinedURLLength)
 }
 
 // partitionStreamsWithBudget is partitionStreams with explicit budgets, so tests can exercise

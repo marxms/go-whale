@@ -735,7 +735,7 @@ func (f *KlineFeed) dial(symbols []string, preferredID int) ([]*klinePartition, 
 		return nil, 0, nil
 	}
 	streams := f.klineStreams(symbols)
-	parts := partitionStreams(streams)
+	parts := partitionKlineStreams(streams)
 
 	opened := make([]*klinePartition, 0, len(parts))
 	attached := 0
