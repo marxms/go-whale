@@ -698,9 +698,14 @@ func (c *SDKClient) tradeCallback(symbol string) binancews.Handler {
 		// branches are disjoint and their sum is the parsed count.
 		buf := c.buffers.GetOrCreate(symbol)
 		if buf.Append(*trade) {
-			logger.OrDiscard(c.log).Warn("trade buffer overflow; trade dropped", "symbol", symbol, "cap", c.config.TradeBufferSize)
-			c.tradesDropped.Add(1)
+			total := c.tradesDropped.Add(1)
 			c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+			// The counter carries every loss; the log carries the first one, so a sustained
+			// overflow cannot drown the line that says it started.
+			if total == 1 {
+				logger.OrDiscard(c.log).Warn("trade buffer overflow; trade dropped (first)",
+					"symbol", symbol, "cap", c.config.TradeBufferSize, "total", total)
+			}
 			return
 		}
 		c.tradesIn.Add(1)
