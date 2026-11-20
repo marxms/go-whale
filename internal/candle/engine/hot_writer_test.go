@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/marxms/go-whale/internal/candle"
+	logger "github.com/marxms/go-whale/internal/platform/logging"
 )
 
 func hotWriterKey(symbol string) CompositeKey {
@@ -89,6 +90,7 @@ func TestHotWriterCoalescesLatestPerKey(t *testing.T) {
 func TestHotWriterRecordsDropAndOldestPending(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
+	log, sink := logger.NewCapture(logger.LevelWarn)
 	writer := NewHotWriter(
 		func(_ context.Context, _ []hotWrite) error {
 			started <- struct{}{}
@@ -97,6 +99,7 @@ func TestHotWriterRecordsDropAndOldestPending(t *testing.T) {
 		},
 		WithHotWriterCapacity(2),
 		WithHotWriterInterval(time.Millisecond),
+		WithHotWriterLogger(log),
 	)
 	defer func() {
 		close(release)
@@ -128,6 +131,14 @@ func TestHotWriterRecordsDropAndOldestPending(t *testing.T) {
 	}
 	if stats.OldestPendingAge <= 0 {
 		t.Fatalf("oldest pending age = %v, want > 0", stats.OldestPendingAge)
+	}
+	// O PRIMEIRO drop é nomeado, não só contado: o símbolo e o motivo saem no log.
+	level, found := sink.LevelOf("dropped a closed bucket")
+	if !found || level != logger.LevelWarn {
+		t.Fatalf("first drop log = %s (found=%v), want WARN", level, found)
+	}
+	if _, found := sink.LevelOf("symbol=C"); !found {
+		t.Fatalf("first drop log does not name the dropped symbol: %v", sink.Records())
 	}
 }
 

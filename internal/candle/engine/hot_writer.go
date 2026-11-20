@@ -2,12 +2,14 @@ package engine
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	redisstore "github.com/marxms/go-whale/internal/adapters/outbound/redis"
 	"github.com/marxms/go-whale/internal/candle"
+	logger "github.com/marxms/go-whale/internal/platform/logging"
 )
 
 const (
@@ -58,11 +60,14 @@ type HotWriter struct {
 	inFlight       int
 	inFlightOldest int64
 
-	coalesced atomic.Int64
-	dropped   atomic.Int64
-	failed    atomic.Int64
-	stopped   atomic.Bool
-	startOnce sync.Once
+	coalesced  atomic.Int64
+	dropped    atomic.Int64
+	failed     atomic.Int64
+	stopped    atomic.Bool
+	dropLogged atomic.Bool
+	startOnce  sync.Once
+	// log names the FIRST drop. A counter nobody reads is how a drop stays silent.
+	log *slog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -91,6 +96,11 @@ func WithHotWriterInterval(d time.Duration) HotWriterOption {
 	}
 }
 
+// WithHotWriterLogger names the first drop. Without it the drop is only a counter.
+func WithHotWriterLogger(log *slog.Logger) HotWriterOption {
+	return func(w *HotWriter) { w.log = log }
+}
+
 // NewHotWriter builds the writer. The owner starts on the first admission, so an App that never
 // closes a bucket carries no idle goroutine; the caller must Stop it.
 func NewHotWriter(flush HotFlush, opts ...HotWriterOption) *HotWriter {
@@ -115,12 +125,14 @@ func (w *HotWriter) Enqueue(key CompositeKey, c candle.Candle) bool {
 	if w.stopped.Load() {
 		w.mu.Unlock()
 		w.dropped.Add(1)
+		w.noteFirstDrop(key, "stopped")
 		return false
 	}
 	_, exists := w.pending[key]
 	if !exists && len(w.pending)+w.inFlight >= w.capacity {
 		w.mu.Unlock()
 		w.dropped.Add(1)
+		w.noteFirstDrop(key, "capacity")
 		return false
 	}
 	if exists {
@@ -138,6 +150,21 @@ func (w *HotWriter) Enqueue(key CompositeKey, c candle.Candle) bool {
 	default:
 	}
 	return true
+}
+
+// noteFirstDrop emits exactly one line for the first drop of the process. The rest stay in the
+// counter: a log per dropped bar would itself become the stall.
+func (w *HotWriter) noteFirstDrop(key CompositeKey, reason string) {
+	if !w.dropLogged.CompareAndSwap(false, true) {
+		return
+	}
+	logger.OrDiscard(w.log).Warn("hot writer: dropped a closed bucket (first occurrence)",
+		"exchange", key.Exchange,
+		"market_type", key.MarketType,
+		"symbol", key.Symbol,
+		"timeframe", key.Timeframe,
+		"reason", reason,
+		"capacity", w.capacity)
 }
 
 // Stats reports the counters and the age of the oldest pending/in-flight entry.

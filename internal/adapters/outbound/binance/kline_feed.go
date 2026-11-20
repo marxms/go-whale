@@ -166,6 +166,9 @@ type PartitionStat struct {
 	Restores     int64
 	// LastCloseAtMs is when the newest CLOSED kline frame arrived; zero when none has.
 	LastCloseAtMs int64
+	// SilentSymbols counts the symbols with no producer: all members when the partition is past
+	// the silence limit, zero otherwise. Partition granularity is the finest the feed has.
+	SilentSymbols int
 	// Evidence of the newest terminal event, so a close is attributable per partition.
 	LastCloseCode      int
 	LastCloseCause     string
@@ -397,6 +400,10 @@ func (f *KlineFeed) PartitionStats() []PartitionStat {
 	out := make([]PartitionStat, 0, len(f.parts))
 	for _, part := range f.parts {
 		evidence := part.closeEvidence()
+		silent := 0
+		if float64(now-part.lastFrameAt.Load())/1000 >= KlineSilenceLimitSeconds {
+			silent = part.symbols
+		}
 		out = append(out, PartitionStat{
 			ID:                 part.client.ID,
 			Symbols:            part.symbols,
@@ -405,6 +412,7 @@ func (f *KlineFeed) PartitionStats() []PartitionStat {
 			Reconnects:         part.reconnects.Load(),
 			Restores:           part.restores.Load(),
 			LastCloseAtMs:      part.lastCloseAt.Load(),
+			SilentSymbols:      silent,
 			LastCloseCode:      evidence.code,
 			LastCloseCause:     evidence.cause,
 			LastCloseDialAge:   evidence.dialAge,
@@ -517,6 +525,7 @@ func (f *KlineFeed) SilentPartition(limitSeconds float64) (PartitionStat, []stri
 		Reconnects:         worst.reconnects.Load(),
 		Restores:           worst.restores.Load(),
 		LastCloseAtMs:      worst.lastCloseAt.Load(),
+		SilentSymbols:      worst.symbols,
 		LastCloseCode:      evidence.code,
 		LastCloseCause:     evidence.cause,
 		LastCloseDialAge:   evidence.dialAge,

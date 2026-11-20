@@ -60,8 +60,10 @@ type PartitionHealth struct {
 	Symbols        int   `json:"symbols"`
 	Frames         int64 `json:"frames"`
 	LastFrameAgeMs int64 `json:"last_frame_age_ms"`
-	Reconnects     int64 `json:"reconnects"`
-	Restores       int64 `json:"restores"`
+	// SilentSymbols is the count of symbols with no producer on this partition.
+	SilentSymbols int   `json:"silent_symbols"`
+	Reconnects    int64 `json:"reconnects"`
+	Restores      int64 `json:"restores"`
 	// LastCloseAtMs is when the newest CLOSED kline frame was received on this partition;
 	// zero when no close has arrived since the connection opened.
 	LastCloseAtMs int64 `json:"last_close_at_ms"`

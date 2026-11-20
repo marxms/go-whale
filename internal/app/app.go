@@ -103,8 +103,19 @@ type App struct {
 	// nonCoinSymbols holds the venue markets whose underlying is TradFi (EQUITY,
 	// COMMODITY, ...). They follow the venue's own trading hours, so the fleet-liveness
 	// denominator excludes them; their WebSocket health and gap recovery still apply.
-	nonCoinSymbols     sync.Map
-	coldPending        sync.Map // exchange:market_type -> *atomic.Int64, the marked-not-durable depth
+	nonCoinSymbols sync.Map
+	coldPending    sync.Map // exchange:market_type -> *atomic.Int64, the marked-not-durable depth
+	// coldMarker* is the single owner of the `cold_pending` marker write. The reader only
+	// enqueues: a Redis write there turns a stalled Redis into a silent partition.
+	coldMarkerMu      sync.Mutex
+	coldMarkerQueue   chan questdb.ColdID
+	coldMarkerStop    chan struct{}
+	coldMarkerDone    chan struct{}
+	coldMarkerStarted bool
+	coldMarkerClosed  bool
+	coldMarkerDropped atomic.Int64
+	// coldMarkerWrite is the observability write seam; nil uses the shared Redis client.
+	coldMarkerWrite    func(ctx context.Context, key string, ttl time.Duration) error
 	metrics            AppMetrics
 	streamMetrics      streaming.Metrics
 	binanceMetrics     binancesdk.Metrics

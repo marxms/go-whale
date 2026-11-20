@@ -21,7 +21,7 @@ func TestHealthReportExposesPerPartitionRows(t *testing.T) {
 			ID: 1, Symbols: 300, Frames: 1_200, LastFrameAgeMs: 250,
 			Restores: 1, LastCloseAtMs: now.Add(-time.Second).UnixMilli(),
 		},
-		{ID: 2, Symbols: 301, Frames: 30, LastFrameAgeMs: 90_000, Reconnects: 2},
+		{ID: 2, Symbols: 301, Frames: 30, LastFrameAgeMs: 90_000, Reconnects: 2, SilentSymbols: 301},
 	}
 	report := health.NewAggregator(health.Probes{
 		StartedAt: func() time.Time { return now.Add(-2 * health.StartupGrace) },
@@ -39,6 +39,15 @@ func TestHealthReportExposesPerPartitionRows(t *testing.T) {
 	}
 	if report.Partitions[1].ID != 2 || report.Partitions[1].LastFrameAgeMs != 90_000 {
 		t.Fatalf("second partition = %+v, want id=2 age=90000", report.Partitions[1])
+	}
+	// Reconnects e o último close fazem parte da linha, não só de um teste vizinho.
+	if report.Partitions[0].LastCloseAtMs == 0 || report.Partitions[1].Reconnects != 2 {
+		t.Fatalf("per-partition rows lost reconnects/last close: %+v", report.Partitions)
+	}
+	// Símbolos sem produtor por partição: a partição silenciosa carrega todos os seus.
+	if report.Partitions[1].SilentSymbols != 301 || report.Partitions[0].SilentSymbols != 0 {
+		t.Fatalf("silent symbols = %d/%d, want 0/301",
+			report.Partitions[0].SilentSymbols, report.Partitions[1].SilentSymbols)
 	}
 	// Observational only: the silent-fraction verdict is a separate probe, so the row alone
 	// must not turn the process unhealthy.
@@ -75,7 +84,7 @@ func TestHealthReportExposesPartitionFramesReconnects(t *testing.T) {
 		Partitions: func() ([]health.PartitionHealth, bool) {
 			return []health.PartitionHealth{{
 				ID: 7, Symbols: 12, Frames: 9_001, LastFrameAgeMs: 1_200,
-				Reconnects: 3, Restores: 4, LastCloseAtMs: closeAt,
+				Reconnects: 3, Restores: 4, LastCloseAtMs: closeAt, SilentSymbols: 0,
 				LastCloseCode: 1006, LastCloseCause: "transport_unattributed",
 				LastCloseDialAgeMs: 90_000, LastCloseStreams: 12, LastCloseSisterAgeMs: 250,
 			}}, true

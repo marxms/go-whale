@@ -42,6 +42,11 @@ func TestColdDropMarksPendingAndSchedulesRepair(t *testing.T) {
 	manager := recovery.NewManager(nil, 0, tfReg, log)
 
 	app := &App{redisStore: rs, qdbPipeline: pipe, gapRecovery: manager}
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		app.stopColdMarkers(stopCtx)
+	})
 	key := engine.CompositeKey{Exchange: "binance", MarketType: "future", Symbol: "BTC/USDT", Timeframe: "5m"}
 	closed := candle.Candle{
 		Timestamp: 1_700_000_000_000, Close: 100, Volume: 10,
@@ -51,6 +56,11 @@ func TestColdDropMarksPendingAndSchedulesRepair(t *testing.T) {
 	app.onCandleClose(key, closed)
 
 	pendingKey := "cold:pending:binance:future:BTC/USDT:5m:1700000000000"
+	// A marca é escrita pelo dono, fora do reader: o teste espera o dono, não o chamador.
+	deadline := time.Now().Add(2 * time.Second)
+	for !mr.Exists(pendingKey) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if !mr.Exists(pendingKey) {
 		t.Fatal("the refused candle was not marked cold_pending")
 	}

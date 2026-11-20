@@ -90,6 +90,11 @@ func (a *App) shutdown(ctx context.Context) error {
 		}
 		cancel()
 	}
+	// The marker owner drains before the Redis client closes. A marker left behind is at worst
+	// a missing observability key; the repair already asked for the bucket.
+	markerCtx, markerCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+	a.stopColdMarkers(markerCtx)
+	markerCancel()
 	if a.qdbPipeline != nil {
 		a.qdbPipeline.Stop(shutdownCtx)
 	}

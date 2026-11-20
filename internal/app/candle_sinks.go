@@ -160,21 +160,110 @@ func coldPendingKey(id questdb.ColdID) string {
 // markColdPending declares the bar not-durable in the hot tier and asks the existing targeted
 // repair for the exact bucket. The repair is the authority; the marker keeps the refusal visible
 // until it is reconciled, so a cold copy is never reported complete by omission.
+//
+// NO I/O ON THE READER. This runs from onCandleClose, on the partition's reader goroutine. The
+// marker is an observability write, and awaiting Redis here made a stalled Redis stop the socket
+// — the exact coupling the hot queue exists to remove. It goes to a bounded owner instead.
 func (a *App) markColdPending(id questdb.ColdID) {
 	counter, _ := a.coldPending.LoadOrStore(id.Exchange+":"+id.MarketType, new(atomic.Int64))
 	depth := counter.(*atomic.Int64).Add(1)
 	if a.engineMetrics.ColdPendingDepth != nil {
 		a.engineMetrics.ColdPendingDepth(id.Exchange, id.MarketType, float64(depth))
 	}
-	if a.redisStore != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), coldPendingWriteTimeout)
-		if err := a.redisStore.Client().Set(ctx, coldPendingKey(id), "1", coldPendingTTL).Err(); err != nil {
-			a.logger().Warn("cold pipeline: failed to mark the refused candle",
-				"symbol", id.Symbol, "timeframe", id.Timeframe, "timestamp", id.Timestamp, "error", err)
-		}
-		cancel()
+	if a.coldMarkerWrite != nil || a.redisStore != nil {
+		a.queueColdMarker(id)
 	}
 	if a.gapRecovery != nil {
 		a.gapRecovery.EnqueueTargetedBucket(id.Exchange, id.MarketType, id.Symbol, id.Timeframe, id.Timestamp)
+	}
+}
+
+const coldMarkerQueueCap = 512
+
+// queueColdMarker admits the marker without blocking. A full queue drops the marker and counts
+// it: the targeted repair is already scheduled by the caller, so the bar is never silently
+// declared complete; only the Redis breadcrumb is lost.
+func (a *App) queueColdMarker(id questdb.ColdID) {
+	a.coldMarkerMu.Lock()
+	if !a.coldMarkerStarted && !a.coldMarkerClosed {
+		a.coldMarkerQueue = make(chan questdb.ColdID, coldMarkerQueueCap)
+		a.coldMarkerStop = make(chan struct{})
+		a.coldMarkerDone = make(chan struct{})
+		a.coldMarkerStarted = true
+		go a.runColdMarkers()
+	}
+	queue := a.coldMarkerQueue
+	closed := a.coldMarkerClosed
+	a.coldMarkerMu.Unlock()
+	if closed || queue == nil {
+		a.noteColdMarkerDropped()
+		return
+	}
+	select {
+	case queue <- id:
+	default:
+		a.noteColdMarkerDropped()
+	}
+}
+
+func (a *App) noteColdMarkerDropped() {
+	if a.coldMarkerDropped.Add(1) == 1 {
+		a.logger().Warn("cold pending: marker queue full; the targeted repair remains the authority",
+			"queue", coldMarkerQueueCap)
+	}
+}
+
+func (a *App) runColdMarkers() {
+	defer close(a.coldMarkerDone)
+	for {
+		select {
+		case <-a.coldMarkerStop:
+			for {
+				select {
+				case id := <-a.coldMarkerQueue:
+					a.flushColdMarker(id)
+				default:
+					return
+				}
+			}
+		case id := <-a.coldMarkerQueue:
+			a.flushColdMarker(id)
+		}
+	}
+}
+
+func (a *App) flushColdMarker(id questdb.ColdID) {
+	ctx, cancel := context.WithTimeout(context.Background(), coldPendingWriteTimeout)
+	defer cancel()
+	key := coldPendingKey(id)
+	var err error
+	if a.coldMarkerWrite != nil {
+		err = a.coldMarkerWrite(ctx, key, coldPendingTTL)
+	} else if a.redisStore != nil {
+		err = a.redisStore.Client().Set(ctx, key, "1", coldPendingTTL).Err()
+	}
+	if err != nil {
+		a.logger().Warn("cold pipeline: failed to mark the refused candle",
+			"symbol", id.Symbol, "timeframe", id.Timeframe, "timestamp", id.Timestamp, "error", err)
+	}
+}
+
+// stopColdMarkers closes the owner and drains what was admitted, bounded by ctx.
+func (a *App) stopColdMarkers(ctx context.Context) {
+	a.coldMarkerMu.Lock()
+	started := a.coldMarkerStarted
+	stop := a.coldMarkerStop
+	done := a.coldMarkerDone
+	if started {
+		a.coldMarkerClosed = true
+	}
+	a.coldMarkerMu.Unlock()
+	if !started {
+		return
+	}
+	close(stop)
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
 }

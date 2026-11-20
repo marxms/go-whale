@@ -230,6 +230,7 @@ func (a *App) partitionHealth() ([]health.PartitionHealth, bool) {
 			Symbols:              stat.Symbols,
 			Frames:               stat.Frames,
 			LastFrameAgeMs:       stat.LastFrameAge.Milliseconds(),
+			SilentSymbols:        stat.SilentSymbols,
 			Reconnects:           stat.Reconnects,
 			Restores:             stat.Restores,
 			LastCloseAtMs:        stat.LastCloseAtMs,
