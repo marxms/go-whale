@@ -318,3 +318,57 @@ func TestFeedProducerUsesNewestPartition(t *testing.T) {
 		t.Fatalf("producer = %+v, want rest_total when every partition is older than the candle", reports)
 	}
 }
+
+// TestSilentPartitionFractionFailsHealth proves the fraction rule and its publication: a
+// partition carrying more than LivenessStaleFraction of the monitored fleet silent, while a
+// sister is fresh, makes /health unhealthy and names the partition with the silent count.
+func TestSilentPartitionFractionFailsHealth(t *testing.T) {
+	feed := &controlledKlineFeed{
+		partitionSilent: true,
+		victim:          binancesdk.PartitionStat{ID: 3, Symbols: 120, LastFrameAge: 2 * time.Minute},
+		victimMembers:   make([]string, 120),
+	}
+	app := &App{klineFeed: feed, klineScope: "binance:future"}
+
+	verdict, found := app.silentPartitionVerdict(400)
+	if !found {
+		t.Fatal("120/400 silent symbols must exceed the declared fraction")
+	}
+	if verdict.PartitionID != 3 || verdict.SilentSymbols != 120 || verdict.Scope != "binance:future" {
+		t.Fatalf("verdict = %+v, want partition 3 with 120 silent symbols", verdict)
+	}
+
+	// Below the fraction (40/400 = 10% <= 20%) the partition is not the verdict.
+	feed.victim = binancesdk.PartitionStat{ID: 4, Symbols: 40, LastFrameAge: 2 * time.Minute}
+	feed.victimMembers = make([]string, 40)
+	if _, found := app.silentPartitionVerdict(400); found {
+		t.Fatal("a partition below the fraction must not fail the health")
+	}
+
+	now := time.Now()
+	probes := func(silent []health.SilentPartitionReport) health.Probes {
+		return health.Probes{
+			StartedAt: func() time.Time { return now.Add(-2 * health.StartupGrace) },
+			Connections: func() []health.Connection {
+				return []health.Connection{{Exchange: "binance", MarketType: "future", Connected: true, Healthy: true, Symbols: 400}}
+			},
+			SilentPartitions: func() ([]health.SilentPartitionReport, bool) { return silent, true },
+		}
+	}
+	evaluated := health.NewAggregator(probes([]health.SilentPartitionReport{verdict})).Evaluate()
+	if evaluated.HTTPStatus != http.StatusServiceUnavailable || evaluated.Status != "unhealthy" {
+		t.Fatalf("status = %q/%d, want unhealthy/503", evaluated.Status, evaluated.HTTPStatus)
+	}
+	if len(evaluated.SilentPartitions) != 1 || evaluated.SilentPartitions[0].PartitionID != 3 || evaluated.SilentPartitions[0].SilentSymbols != 120 {
+		t.Fatalf("silent partitions = %+v, want the partition and the count", evaluated.SilentPartitions)
+	}
+	if state, ok := livenessReportComponent(evaluated, "fleet_liveness"); !ok || state != health.ComponentUnhealthy {
+		t.Fatalf("fleet_liveness = %q (found=%v), want unhealthy", state, ok)
+	}
+
+	// A configured probe with no silent partition is a healthy fleet sample, not an absent one.
+	healthy := health.NewAggregator(probes(nil)).Evaluate()
+	if healthy.HTTPStatus != http.StatusOK {
+		t.Fatalf("status without a silent partition = %d, want 200", healthy.HTTPStatus)
+	}
+}

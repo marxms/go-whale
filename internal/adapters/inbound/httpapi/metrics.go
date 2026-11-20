@@ -42,8 +42,11 @@ type MetricsCollector struct {
 	// partitions stores func() ([]health.PartitionHealth, bool): one row per feed partition,
 	// so a silent partition is visible without reading the process's sockets.
 	partitions atomic.Value
-	aggregator *health.Aggregator
-	log        *slog.Logger
+	// silentPartitions stores []health.SilentPartitionReport: the partitions above the
+	// declared silent fraction. Non-empty makes /health unhealthy after the grace.
+	silentPartitions atomic.Value
+	aggregator       *health.Aggregator
+	log              *slog.Logger
 }
 
 // fleetLivenessSnapshot is the ONE atomic record the sampler publishes. The failing
@@ -89,6 +92,10 @@ func NewMetricsCollector(hybridManager HybridManagerStats, logs ...*slog.Logger)
 				return nil, false
 			}
 			return probe()
+		},
+		SilentPartitions: func() ([]health.SilentPartitionReport, bool) {
+			rows, ok := mc.silentPartitions.Load().([]health.SilentPartitionReport)
+			return rows, ok
 		},
 		TimeframeFreshness: func() ([]health.TimeframeFreshness, bool) {
 			probe, _ := mc.timeframeFreshness.Load().(func() ([]health.TimeframeFreshness, bool))
@@ -207,6 +214,12 @@ func (mc *MetricsCollector) SetPartitions(probe func() ([]health.PartitionHealth
 	mc.partitions.Store(probe)
 }
 
+// SetSilentPartitions publishes the partitions above the declared silent fraction. An empty
+// slice is a healthy sample; a nil probe is "not configured" and never a passed check.
+func (mc *MetricsCollector) SetSilentPartitions(rows []health.SilentPartitionReport) {
+	mc.silentPartitions.Store(append([]health.SilentPartitionReport(nil), rows...))
+}
+
 func (mc *MetricsCollector) SetExpectedScopes(scopes []string) {
 	canon := make([]string, 0, len(scopes))
 	for _, s := range scopes {
@@ -219,16 +232,17 @@ func (mc *MetricsCollector) SetExpectedScopes(scopes []string) {
 
 // HealthResponse is the JSON response for /health.
 type HealthResponse struct {
-	Status            string                    `json:"status"` // "healthy", "degraded", "unhealthy", "starting"
-	Uptime            string                    `json:"uptime"`
-	Goroutines        int                       `json:"goroutines"`
-	Connections       []ConnectionHealthSummary `json:"connections,omitempty"`
-	Partitions        []health.PartitionHealth  `json:"partitions,omitempty"`
-	DerivativesPoller bool                      `json:"derivatives_poller"` // true if the poller goroutine is alive
-	TimeframeChecksum string                    `json:"timeframe_checksum,omitempty"`
-	MissingScopes     []string                  `json:"missing_scopes,omitempty"`    // expected scopes with no healthy connected stream (post-grace)
-	StaleScopes       []string                  `json:"stale_scopes,omitempty"`      // scopes connected but with most symbols frozen (per-symbol liveness, post-grace)
-	CoverageDeficits  []string                  `json:"coverage_deficits,omitempty"` // scopes streaming fewer symbols than configured, as "scope: effective/configured"`
+	Status            string                         `json:"status"` // "healthy", "degraded", "unhealthy", "starting"
+	Uptime            string                         `json:"uptime"`
+	Goroutines        int                            `json:"goroutines"`
+	Connections       []ConnectionHealthSummary      `json:"connections,omitempty"`
+	Partitions        []health.PartitionHealth       `json:"partitions,omitempty"`
+	SilentPartitions  []health.SilentPartitionReport `json:"silent_partitions,omitempty"`
+	DerivativesPoller bool                           `json:"derivatives_poller"` // true if the poller goroutine is alive
+	TimeframeChecksum string                         `json:"timeframe_checksum,omitempty"`
+	MissingScopes     []string                       `json:"missing_scopes,omitempty"`    // expected scopes with no healthy connected stream (post-grace)
+	StaleScopes       []string                       `json:"stale_scopes,omitempty"`      // scopes connected but with most symbols frozen (per-symbol liveness, post-grace)
+	CoverageDeficits  []string                       `json:"coverage_deficits,omitempty"` // scopes streaming fewer symbols than configured, as "scope: effective/configured"`
 	// CandleFreshness is the per-scope detail behind stale_scopes: newest readable age,
 	// monitored symbols and stale symbols. Additive; every field above keeps its name,
 	// shape and omitempty behavior.
@@ -296,6 +310,7 @@ func (mc *MetricsCollector) Health(w http.ResponseWriter, _ *http.Request) {
 		Goroutines:          report.Goroutines,
 		Connections:         summaries,
 		Partitions:          report.Partitions,
+		SilentPartitions:    report.SilentPartitions,
 		DerivativesPoller:   report.DerivativesPoller,
 		TimeframeChecksum:   report.TimeframeChecksum,
 		MissingScopes:       report.MissingScopes,

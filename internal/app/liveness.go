@@ -116,6 +116,11 @@ func (a *App) sampleAndPublishFleetLiveness() {
 	)
 	a.metricsCollector.SetFleetLiveness(a.livenessHysteresis.observe(failing), freshness)
 	a.metricsCollector.SetFeedProducers(a.feedProducerReports(now, freshness))
+	var silent []health.SilentPartitionReport
+	if verdict, found := a.silentPartitionVerdict(len(a.livenessSubscriptions(subs))); found {
+		silent = []health.SilentPartitionReport{verdict}
+	}
+	a.metricsCollector.SetSilentPartitions(silent)
 }
 
 // sampleFleetLivenessFromConfig computes PER-SYMBOL fleet freshness for every enabled scope
@@ -153,6 +158,44 @@ func (a *App) sampleFleetLivenessFromConfig(ctx context.Context, provider recove
 	return health.SampleFleetLiveness(
 		ctx, scopes, provider, a.livenessSubscriptions(subs), fastestTF, isStale, a.streamMetrics,
 	)
+}
+
+// silentPartitionVerdict reports the ONE silent partition whose symbols exceed the declared
+// fraction of the monitored fleet. SilentPartition already refuses to blame a partition when
+// no sister is fresh (or when every partition is silent), so this verdict only ever names a
+// scoped fault with a live sibling to compare against.
+func (a *App) silentPartitionVerdict(fleet int) (health.SilentPartitionReport, bool) {
+	a.klineMu.Lock()
+	feed := a.klineFeed
+	scope := a.klineScope
+	a.klineMu.Unlock()
+	if fleet <= 0 || scope == "" {
+		return health.SilentPartitionReport{}, false
+	}
+	provider, ok := feed.(interface {
+		SilentPartition(float64) (binancesdk.PartitionStat, []string, bool)
+	})
+	if !ok {
+		return health.SilentPartitionReport{}, false
+	}
+	stat, members, found := provider.SilentPartition(binancesdk.KlineSilenceLimitSeconds)
+	if !found {
+		return health.SilentPartitionReport{}, false
+	}
+	silentSymbols := len(members)
+	if silentSymbols == 0 {
+		silentSymbols = stat.Symbols
+	}
+	if float64(silentSymbols)/float64(fleet) <= health.LivenessStaleFraction {
+		return health.SilentPartitionReport{}, false
+	}
+	return health.SilentPartitionReport{
+		PartitionID:    stat.ID,
+		Scope:          health.CanonicalScope(scope),
+		Symbols:        stat.Symbols,
+		SilentSymbols:  silentSymbols,
+		LastFrameAgeMs: stat.LastFrameAge.Milliseconds(),
+	}, true
 }
 
 // partitionHealth maps the kline feed's per-partition stats onto the /health DTO. The feed is

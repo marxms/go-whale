@@ -129,6 +129,17 @@ type FeedProducerReport struct {
 	HaveFeed      bool
 }
 
+// SilentPartitionReport names a partition whose silent symbols exceed the declared fraction
+// of the monitored fleet while at least one sister is fresh. The verdict is unhealthy: those
+// symbols have no producer, and the partition id is what an operator restarts.
+type SilentPartitionReport struct {
+	PartitionID    int    `json:"partition_id"`
+	Scope          string `json:"scope"`
+	Symbols        int    `json:"symbols"`
+	SilentSymbols  int    `json:"silent_symbols"`
+	LastFrameAgeMs int64  `json:"last_frame_age_ms"`
+}
+
 // CandleFreshnessReport is the wire detail published under candle_freshness. Stale counts
 // symbols, not the age of the newest one: a single leading symbol must not mask a frozen
 // fleet. FreshestAgoMs is operational detail, never the only signal.
@@ -181,6 +192,10 @@ type Probes struct {
 	// Partitions returns one row per live feed partition. Observational: the verdict over a
 	// silent fraction belongs to fleet liveness, not to this probe.
 	Partitions func() ([]PartitionHealth, bool)
+	// SilentPartitions returns the partitions that exceeded the declared fraction of the
+	// monitored fleet while a sister stayed fresh. A non-empty list makes the process
+	// unhealthy after the startup grace, naming the partition and the silent count.
+	SilentPartitions func() ([]SilentPartitionReport, bool)
 	// ExpectedScopes returns the canonical scopes that MUST be live after the grace.
 	ExpectedScopes func() ([]string, bool)
 	// LivenessFailing returns scopes whose per-symbol fleet liveness is below threshold.
@@ -220,6 +235,7 @@ type Report struct {
 
 	Connections        []ConnectionSummary
 	Partitions         []PartitionHealth
+	SilentPartitions   []SilentPartitionReport
 	DerivativesPoller  bool
 	TimeframeChecksum  string
 	MissingScopes      []string
@@ -377,13 +393,31 @@ func (a *Aggregator) Evaluate() Report {
 			httpStatus = 503
 		}
 	}
+	// A silent partition above the declared fraction is the same verdict as a stale scope: the
+	// symbols it carries have no producer while a sister does. The row names the partition and
+	// the count, so an operator restarts the victim instead of the fleet.
+	var silentPartitions []SilentPartitionReport
+	silentConfigured := false
+	if a.probes.SilentPartitions != nil {
+		silentPartitions, silentConfigured = a.probes.SilentPartitions()
+		if silentConfigured && elapsed > StartupGrace && len(silentPartitions) > 0 {
+			status = statusUnhealthy
+			httpStatus = 503
+		}
+	}
 	switch {
-	case !livenessConfigured:
+	case !livenessConfigured && !silentConfigured:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentAbsent, Reason: reasonNotConfigured})
 	case elapsed <= StartupGrace:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentStarting, Reason: reasonStartupGrace})
 	case len(staleScopes) > 0:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentUnhealthy, Reason: fmt.Sprintf("%d stale scope(s)", len(staleScopes))})
+	case len(silentPartitions) > 0:
+		components = append(components, ComponentReport{
+			Name:   componentFleetLiveness,
+			State:  ComponentUnhealthy,
+			Reason: fmt.Sprintf("partition %d silent: %d symbols", silentPartitions[0].PartitionID, silentPartitions[0].SilentSymbols),
+		})
 	default:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentOK})
 	}
@@ -619,6 +653,7 @@ func (a *Aggregator) Evaluate() Report {
 		Goroutines:          runtime.NumGoroutine(),
 		Connections:         summaries,
 		Partitions:          partitions,
+		SilentPartitions:    silentPartitions,
 		DerivativesPoller:   derivPoller,
 		TimeframeChecksum:   checksum,
 		MissingScopes:       missingScopes,
