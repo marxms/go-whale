@@ -129,7 +129,7 @@ func NewHybridManager(handler TradeHandler, numWorkers int, factories map[string
 		numWorkers:      numWorkers,
 		processQueue:    make(chan *HybridClientState, 100000),
 		minProcessDelay: defaultMinProcessDelay, // 50ms - for market euphoria
-		maxProcessDelay: defaultMaxProcessDelay, // 500ms - for idle periods
+		maxProcessDelay: defaultMaxProcessDelay, // 200ms - for idle periods
 		currentDelay:    defaultMaxProcessDelay, // Start conservative
 		factories:       catalog,
 		log:             logger.OrDiscard(logs...),
