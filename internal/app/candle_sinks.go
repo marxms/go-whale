@@ -194,10 +194,19 @@ func (a *App) queueColdMarker(id questdb.ColdID) {
 	}
 	queue := a.coldMarkerQueue
 	closed := a.coldMarkerClosed
+	stop := a.coldMarkerStop
 	a.coldMarkerMu.Unlock()
 	if closed || queue == nil {
 		a.noteColdMarkerDropped()
 		return
+	}
+	// The consumer exits after the stop drains. A marker admitted after that would sit in the
+	// buffer forever, so a stopped owner counts as a drop instead of a silent admission.
+	select {
+	case <-stop:
+		a.noteColdMarkerDropped()
+		return
+	default:
 	}
 	select {
 	case queue <- id:
@@ -252,15 +261,15 @@ func (a *App) flushColdMarker(id questdb.ColdID) {
 func (a *App) stopColdMarkers(ctx context.Context) {
 	a.coldMarkerMu.Lock()
 	started := a.coldMarkerStarted
-	stop := a.coldMarkerStop
-	done := a.coldMarkerDone
-	if started {
-		a.coldMarkerClosed = true
-	}
-	a.coldMarkerMu.Unlock()
-	if !started {
+	if !started || a.coldMarkerStopClosed {
+		a.coldMarkerMu.Unlock()
 		return
 	}
+	a.coldMarkerStopClosed = true
+	a.coldMarkerClosed = true
+	stop := a.coldMarkerStop
+	done := a.coldMarkerDone
+	a.coldMarkerMu.Unlock()
 	close(stop)
 	select {
 	case <-done:

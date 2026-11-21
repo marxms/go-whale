@@ -113,13 +113,14 @@ type App struct {
 	coldPending    sync.Map // exchange:market_type -> *atomic.Int64, the marked-not-durable depth
 	// coldMarker* is the single owner of the `cold_pending` marker write. The reader only
 	// enqueues: a Redis write there turns a stalled Redis into a silent partition.
-	coldMarkerMu      sync.Mutex
-	coldMarkerQueue   chan questdb.ColdID
-	coldMarkerStop    chan struct{}
-	coldMarkerDone    chan struct{}
-	coldMarkerStarted bool
-	coldMarkerClosed  bool
-	coldMarkerDropped atomic.Int64
+	coldMarkerMu         sync.Mutex
+	coldMarkerQueue      chan questdb.ColdID
+	coldMarkerStop       chan struct{}
+	coldMarkerDone       chan struct{}
+	coldMarkerStarted    bool
+	coldMarkerClosed     bool
+	coldMarkerStopClosed bool
+	coldMarkerDropped    atomic.Int64
 	// coldMarkerWrite is the observability write seam; nil uses the shared Redis client.
 	coldMarkerWrite    func(ctx context.Context, key string, ttl time.Duration) error
 	metrics            AppMetrics
