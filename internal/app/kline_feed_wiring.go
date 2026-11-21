@@ -30,6 +30,29 @@ type klineFeed interface {
 
 type klineFeedFactory func(context.Context, string, string, string, func(string, candle.Candle)) klineFeed
 
+// klineFeedHolder wraps the interface in a fixed concrete type for atomic.Value: tests store
+// different feed implementations, and atomic.Value requires one concrete type per Value.
+type klineFeedHolder struct{ feed klineFeed }
+
+// publishKlineSnapshotLocked publishes the probe state. Callers hold klineMu.
+func (a *App) publishKlineSnapshotLocked() {
+	a.klineFeedSnap.Store(klineFeedHolder{feed: a.klineFeed})
+	a.klineScopeSnap.Store(a.klineScope)
+	a.klineExhaustedSnap.Store(a.klineReconnectExhausted)
+}
+
+// klineHealthState returns the feed, scope and terminal flag WITHOUT ever blocking on klineMu.
+// If the lock is momentarily held (the normal case), the last published snapshot is used.
+func (a *App) klineHealthState() (feed klineFeed, scope string, exhausted bool) {
+	if a.klineMu.TryLock() {
+		defer a.klineMu.Unlock()
+		return a.klineFeed, a.klineScope, a.klineReconnectExhausted
+	}
+	holder, _ := a.klineFeedSnap.Load().(klineFeedHolder)
+	scope, _ = a.klineScopeSnap.Load().(string)
+	return holder.feed, scope, a.klineExhaustedSnap.Load()
+}
+
 type klineGapHeads map[engine.CompositeKey]int64
 
 func (heads klineGapHeads) GetLatestTimestamp(_ context.Context, exchangeID, marketType, symbol, tf string) (int64, bool) {
@@ -140,6 +163,7 @@ func (a *App) startKlineFeed(ctx context.Context, exchangeID, marketType string,
 	a.klineFeed = feed
 	a.klineScope = exchangeID + ":" + marketType
 	a.klineSymbols = appendMissing(nil, symbols)
+	a.publishKlineSnapshotLocked()
 	a.candleEngine.RegisterDerivedScope(exchangeID, marketType, binancesdk.KlineFeedInterval)
 	a.klineMu.Unlock()
 	a.startKlineWatchdog(ctx, exchangeID, marketType)
@@ -173,6 +197,7 @@ func (a *App) noteKlineHealthy() {
 	if a.klineBackoffPolicy().Stable(now.Sub(a.klineHealthySince)) {
 		a.klineFailures = 0
 		a.klineReconnectExhausted = false
+		a.publishKlineSnapshotLocked()
 	}
 }
 
@@ -276,6 +301,7 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	}
 	if a.klineFailures >= klineMaxReconnectAttempts {
 		a.klineReconnectExhausted = true
+		a.publishKlineSnapshotLocked()
 		a.logger().Error("kline feed: reconnect exhausted; automatic redial stopped",
 			"attempts", a.klineFailures,
 			"exchange", exchangeID,
@@ -346,6 +372,7 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	a.klineFeed = fresh
 	a.klineSymbols = fleet
 	a.klinePendingAttach = nil
+	a.publishKlineSnapshotLocked()
 
 	// THE HOLE THE RESTART JUST LEFT, HEALED THE WAY THE PROCESS RESTART ALREADY HEALS ITS OWN.
 	//

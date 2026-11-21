@@ -163,12 +163,11 @@ func (a *App) sampleFleetLivenessFromConfig(ctx context.Context, provider recove
 // klineReconnectExhaustedProbe reports whether the bounded redial gave up. A feed that stopped
 // retrying has no candle producer, so the health verdict must not read it as merely quiet.
 func (a *App) klineReconnectExhaustedProbe() (bool, bool) {
-	a.klineMu.Lock()
-	defer a.klineMu.Unlock()
-	if a.klineFeed == nil && a.klineScope == "" {
+	feed, scope, exhausted := a.klineHealthState()
+	if feed == nil && scope == "" {
 		return false, false
 	}
-	return a.klineReconnectExhausted, true
+	return exhausted, true
 }
 
 // silentPartitionVerdict reports the ONE silent partition whose symbols exceed the declared
@@ -176,10 +175,7 @@ func (a *App) klineReconnectExhaustedProbe() (bool, bool) {
 // no sister is fresh (or when every partition is silent), so this verdict only ever names a
 // scoped fault with a live sibling to compare against.
 func (a *App) silentPartitionVerdict(fleet int) (health.SilentPartitionReport, bool) {
-	a.klineMu.Lock()
-	feed := a.klineFeed
-	scope := a.klineScope
-	a.klineMu.Unlock()
+	feed, scope, _ := a.klineHealthState()
 	if fleet <= 0 || scope == "" {
 		return health.SilentPartitionReport{}, false
 	}
@@ -213,9 +209,7 @@ func (a *App) silentPartitionVerdict(fleet int) (health.SilentPartitionReport, b
 // read through an optional interface so a test double or a non-partitioned feed reports
 // "not configured" instead of pretending a partition exists.
 func (a *App) partitionHealth() ([]health.PartitionHealth, bool) {
-	a.klineMu.Lock()
-	feed := a.klineFeed
-	a.klineMu.Unlock()
+	feed, _, _ := a.klineHealthState()
 	provider, ok := feed.(interface {
 		PartitionStats() []binancesdk.PartitionStat
 	})

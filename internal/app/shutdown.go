@@ -205,6 +205,7 @@ func (a *App) stopKlineFeed() {
 	liveFeed := a.klineFeed
 	closingScope := a.klineScope
 	a.klineFeed = nil
+	a.publishKlineSnapshotLocked()
 	a.klineMu.Unlock()
 	if a.candleEngine != nil && closingScope != "" {
 		a.candleEngine.UnregisterDerivedScope(closingScope)

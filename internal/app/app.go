@@ -71,6 +71,12 @@ type App struct {
 	// klineReconnectExhausted is terminal: the bounded attempts are spent and the watchdog stopped
 	// redialing. The health probe publishes it so a silent scope is not mistaken for a quiet one.
 	klineReconnectExhausted bool
+	// Health probes must NEVER block on klineMu: the watchdog holds it across Stop/Start, whose
+	// dials are bounded at 40 s, while the compose healthcheck times out at 3 s. These atomics
+	// publish the last coherent state; a probe TRYs the lock and falls back to them.
+	klineFeedSnap      atomic.Value // klineFeedHolder
+	klineScopeSnap     atomic.Value // string
+	klineExhaustedSnap atomic.Bool
 	// klinePendingAttach holds symbols a previous attach failed on: already subscribed and
 	// seeded, so no later discovery cycle classifies them as new.
 	klinePendingAttach []string
