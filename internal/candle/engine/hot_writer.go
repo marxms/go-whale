@@ -13,16 +13,26 @@ import (
 )
 
 const (
-	defaultHotWriterCapacity = 4096
+	// The bound is DISTINCT (series, bar) pairs, not series: a Redis stall spanning several
+	// boundaries must not collapse them. 500 assets x 8 timeframes x 8 boundaries = 32k.
+	defaultHotWriterCapacity = 32768
 	defaultHotWriterInterval = 50 * time.Millisecond
 )
 
-// hotWrite is one pending closed-bucket snapshot. The key is the coalescing identity; the
-// candle is the LATEST value seen for that key, never a delta.
+// hotWrite is one pending closed-bucket snapshot. The candle is the LATEST value seen for
+// its (series, bar), never a delta.
 type hotWrite struct {
 	key    CompositeKey
 	candle candle.Candle
 	atMs   int64
+}
+
+// hotBucketKey is the coalescing identity: one bar of one series. Keying by the series alone
+// collapsed every closed bar that accumulated before a flush into the last one — measured in
+// the lifecycle test (2/8 failures) and in production terms a lost 5m bar per flush.
+type hotBucketKey struct {
+	series    CompositeKey
+	timestamp int64
 }
 
 // HotFlush is the owner's write. It runs on the HotWriter goroutine, never on the reader.
@@ -56,16 +66,17 @@ type HotWriter struct {
 	interval time.Duration
 
 	mu             sync.Mutex
-	pending        map[CompositeKey]hotWrite
+	pending        map[hotBucketKey]hotWrite
 	inFlight       int
 	inFlightOldest int64
 
-	coalesced  atomic.Int64
-	dropped    atomic.Int64
-	failed     atomic.Int64
-	stopped    atomic.Bool
-	dropLogged atomic.Bool
-	startOnce  sync.Once
+	coalesced    atomic.Int64
+	dropped      atomic.Int64
+	failed       atomic.Int64
+	stopped      atomic.Bool
+	dropLogged   atomic.Bool
+	failedLogged atomic.Bool
+	startOnce    sync.Once
 	// log names the FIRST drop. A counter nobody reads is how a drop stays silent.
 	log *slog.Logger
 
@@ -108,7 +119,7 @@ func NewHotWriter(flush HotFlush, opts ...HotWriterOption) *HotWriter {
 		flush:    flush,
 		capacity: defaultHotWriterCapacity,
 		interval: defaultHotWriterInterval,
-		pending:  make(map[CompositeKey]hotWrite),
+		pending:  make(map[hotBucketKey]hotWrite),
 		wake:     make(chan struct{}, 1),
 	}
 	for _, opt := range opts {
@@ -121,24 +132,25 @@ func NewHotWriter(flush HotFlush, opts ...HotWriterOption) *HotWriter {
 // Enqueue admits a closed-bucket snapshot without doing I/O. It returns false only when a NEW
 // key arrives while the bounded queue is full; an existing key is coalesced and admitted.
 func (w *HotWriter) Enqueue(key CompositeKey, c candle.Candle) bool {
+	bucket := hotBucketKey{series: key, timestamp: c.Timestamp}
 	w.mu.Lock()
 	if w.stopped.Load() {
 		w.mu.Unlock()
 		w.dropped.Add(1)
-		w.noteFirstDrop(key, "stopped")
+		w.noteFirstDrop(bucket, "stopped")
 		return false
 	}
-	_, exists := w.pending[key]
+	_, exists := w.pending[bucket]
 	if !exists && len(w.pending)+w.inFlight >= w.capacity {
 		w.mu.Unlock()
 		w.dropped.Add(1)
-		w.noteFirstDrop(key, "capacity")
+		w.noteFirstDrop(bucket, "capacity")
 		return false
 	}
 	if exists {
 		w.coalesced.Add(1)
 	}
-	w.pending[key] = hotWrite{key: key, candle: c, atMs: time.Now().UnixMilli()}
+	w.pending[bucket] = hotWrite{key: key, candle: c, atMs: time.Now().UnixMilli()}
 	// Start under the lock so the WaitGroup Add cannot race the Stop's Wait.
 	w.startOnce.Do(func() {
 		w.wg.Add(1)
@@ -154,15 +166,16 @@ func (w *HotWriter) Enqueue(key CompositeKey, c candle.Candle) bool {
 
 // noteFirstDrop emits exactly one line for the first drop of the process. The rest stay in the
 // counter: a log per dropped bar would itself become the stall.
-func (w *HotWriter) noteFirstDrop(key CompositeKey, reason string) {
+func (w *HotWriter) noteFirstDrop(bucket hotBucketKey, reason string) {
 	if !w.dropLogged.CompareAndSwap(false, true) {
 		return
 	}
 	logger.OrDiscard(w.log).Warn("hot writer: dropped a closed bucket (first occurrence)",
-		"exchange", key.Exchange,
-		"market_type", key.MarketType,
-		"symbol", key.Symbol,
-		"timeframe", key.Timeframe,
+		"exchange", bucket.series.Exchange,
+		"market_type", bucket.series.MarketType,
+		"symbol", bucket.series.Symbol,
+		"timeframe", bucket.series.Timeframe,
+		"timestamp", bucket.timestamp,
 		"reason", reason,
 		"capacity", w.capacity)
 }
@@ -245,7 +258,7 @@ func (w *HotWriter) flushPending(ctx context.Context) {
 			oldest = entry.atMs
 		}
 	}
-	w.pending = make(map[CompositeKey]hotWrite, w.capacity)
+	w.pending = make(map[hotBucketKey]hotWrite, len(batch))
 	w.inFlight = len(batch)
 	w.inFlightOldest = oldest
 	w.mu.Unlock()
@@ -258,6 +271,41 @@ func (w *HotWriter) flushPending(ctx context.Context) {
 	w.mu.Unlock()
 	if err != nil {
 		w.failed.Add(1)
+		w.noteFirstFailure(err)
+		w.requeue(batch)
+	}
+}
+
+// noteFirstFailure names the FIRST failed flush of the process: a counter nobody reads is how
+// a frozen hot tier stays silent.
+func (w *HotWriter) noteFirstFailure(err error) {
+	if !w.failedLogged.CompareAndSwap(false, true) {
+		return
+	}
+	logger.OrDiscard(w.log).Error("hot writer: flush failed; the batch was requeued (first occurrence)",
+		"error", err, "capacity", w.capacity)
+}
+
+// requeue puts a failed batch back without overwriting a NEWER snapshot of the same bar. A
+// batch the flush could not write is not lost: it returns to pending and is retried by the
+// next tick. Overflow is counted as a drop, never silently admitted.
+func (w *HotWriter) requeue(batch []hotWrite) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, entry := range batch {
+		bucket := hotBucketKey{series: entry.key, timestamp: entry.candle.Timestamp}
+		if existing, ok := w.pending[bucket]; ok {
+			if existing.atMs >= entry.atMs {
+				w.coalesced.Add(1)
+				continue
+			}
+		}
+		if len(w.pending)+w.inFlight >= w.capacity {
+			w.dropped.Add(1)
+			w.noteFirstDrop(bucket, "requeue-capacity")
+			continue
+		}
+		w.pending[bucket] = entry
 	}
 }
 
