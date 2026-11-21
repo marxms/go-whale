@@ -88,6 +88,15 @@ margin rate per symbol.
 }
 ```
 
+## Batch timeseries
+
+`GET /api/batch/timeseries?exchange=binance&marketType=future&timeframe=5m&limit=500&symbols=BTC/USDT,ETH/USDT`
+returns one timeframe for many symbols in a single pipeline. `limit` defaults to 500
+and caps at 1000; `symbols` caps at 1000; the PRODUCT caps at 10,000 candles per
+request (`code: batch_too_large` — page instead). The timeframe must be one the
+process models (`code: invalid_timeframe`, the same code as the single-symbol route).
+Each row carries `gapCause` when the bar is marked incomplete.
+
 ## Health and metrics
 
 - `GET /health`: process status, timeframe checksum and per-component state. The
@@ -98,18 +107,24 @@ margin rate per symbol.
 
 ## WebSocket edge
 
-The edge is opt-in and mounts only when both
-`GOWHALE_REALTIME_WS_TICKET_SECRET` and `GOWHALE_REALTIME_WS_MINT_TOKEN` are set
-(at least 32 random bytes each).
+The edge is opt-in and mounts when `GOWHALE_REALTIME_WS_TICKET_SECRET` is set
+(at least 32 random bytes). `GOWHALE_REALTIME_WS_MINT_TOKEN` is OPTIONAL: it belongs
+to a gateway that mints tickets on the server's behalf. When it is not configured,
+`/api/ws-ticket` has no shared-secret check of its own and MUST stay behind the
+gateway's JWT `auth_request` — the ticket endpoint is not a user-auth boundary.
 
-1. The authenticating gateway verifies the user and proxies `GET /api/ws-ticket`
-   with `X-Gowhale-Mint-Token: <mint token>`.
+1. The authenticating gateway verifies the user and proxies `GET /api/ws-ticket`;
+   when `GOWHALE_REALTIME_WS_MINT_TOKEN` is set, it also injects
+   `X-Gowhale-Mint-Token: <mint token>`.
 2. The server returns `{"ticket":"…","expiresAt":…}` with `Cache-Control: no-store`.
 3. The browser opens `GET /api/ws?ticket=<ticket>` from an origin in
    `GOWHALE_REALTIME_WS_ALLOWED_ORIGINS`.
 
 The mint endpoint is not a user-auth boundary by itself; a direct client that knows
-the mint token can mint a ticket, so the gateway must not expose either secret.
+the mint token can mint a ticket, so the gateway must not expose either secret. The
+ticket's `seq` is per process and per channel: it starts at 1 on every restart. A
+consumer that sees it move BACKWARDS must treat that as a new producer epoch (the old
+events will not be replayed), not as a gap; a forward jump is the loss signal.
 Connections and per-connection subscriptions are capped by
 `GOWHALE_REALTIME_WS_MAX_CONNECTIONS` and
 `GOWHALE_REALTIME_WS_MAX_SCOPES_PER_CONNECTION`.
@@ -117,7 +132,7 @@ Connections and per-connection subscriptions are capped by
 ## Errors
 
 Errors use JSON with an `error` string; some routes also return a stable `code`.
-The HTTP status is the contract: `400` for an invalid request, `401` for an invalid
-ticket or missing mint token, `403` for a rejected origin, `404` when the edge is not
-mounted (both WS secrets unset), `503` when it is mounted but its auth is not
-configured, and `500` for a read failure.
+The HTTP status is the contract: `400` for an invalid request (including `code: invalid_timeframe` and
+`code: batch_too_large`), `401` for an invalid ticket or missing mint token, `403` for a
+rejected origin, `404` when the edge is not mounted (no ticket secret), `503` when it
+is mounted but its auth is not configured, and `500` for a read failure.

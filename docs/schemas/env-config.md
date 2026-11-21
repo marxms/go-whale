@@ -110,6 +110,7 @@ baseline floor by the store.
 | `redis_write_through` | bool | `false` | write candle updates to Redis |
 | `snapshot_interval_ms` | int | `5000` | snapshot cadence |
 | `bingx_min_interval_ms` | int | `300` | minimum BingX update interval |
+| `warm_seed_budget_seconds` | int | `120` | boot warm-seed ceiling (30..240); also `GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS` |
 | `redis_cap_by_timeframe` | map | empty | resident candle ZSET cap per timeframe |
 
 The resident cap resolution order is documented in
