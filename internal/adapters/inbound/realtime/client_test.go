@@ -106,11 +106,16 @@ func TestHeartbeatKeepsWritePumpTheSoleWriter(t *testing.T) {
 // the branch under test.
 type heartbeatFailingConn struct {
 	*fakeConn
+	// armed starts false: the connection must survive long enough for its SUBSCRIBE to be
+	// applied. With a 2 ms ping, an always-failing heartbeat can kill the pump before the actor
+	// processes the subscribe, and the test then waits for a scope that will never arrive —
+	// exactly the 10 s CI flake. The failure is the subject, not the race to register.
+	armed  atomic.Bool
 	failed atomic.Bool
 }
 
 func (f *heartbeatFailingConn) WriteMessage(messageType int, data []byte) error {
-	if frameType(data) == string(EventHeartbeat) {
+	if f.armed.Load() && frameType(data) == string(EventHeartbeat) {
 		f.failed.Store(true)
 		return errFakeClosed
 	}
@@ -137,6 +142,9 @@ func TestHeartbeatWriteFailureEndsThePumpLikeAnyOtherFrame(t *testing.T) {
 	// longer, the condition is not weaker: the write must still be attempted and fail.
 	wait := 10 * time.Second
 	require.Eventually(t, func() bool { return h.statsForTest().Scopes == 1 }, wait, eventuallyTick)
+	// Only after the subscription is applied does the heartbeat start failing: the pump must
+	// then take the same path as any failed frame.
+	fc.armed.Store(true)
 
 	require.Eventually(t, func() bool { return fc.failed.Load() }, wait, eventuallyTick,
 		"the heartbeat write was attempted and failed")
