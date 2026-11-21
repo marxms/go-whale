@@ -417,15 +417,18 @@ func (m *HybridManager) calculateAdaptiveDelay() time.Duration {
 		return m.maxProcessDelay
 	}
 
-	// Sample buffer fill ratios
-	var totalFill float64
+	// The buffer is PER SYMBOL. The average fill hides one full symbol behind hundreds of
+	// empty ones — which is exactly how a rally overflowed a hot symbol while the manager
+	// still read "market idle" and kept the 500 ms delay. The symbol that is full is the one
+	// whose drain cadence matters, so the decision uses the MAXIMUM fill.
+	var maxFill float64
 	var samples int
 
 	for _, state := range m.clients {
-		// Check whether the client implements BufferFillAware
 		if fillAware, ok := state.Client.(BackpressureSource); ok {
-			fill := fillAware.GetBufferFillRatio(state.Symbol)
-			totalFill += fill
+			if fill := fillAware.GetBufferFillRatio(state.Symbol); fill > maxFill {
+				maxFill = fill
+			}
 			samples++
 		}
 	}
@@ -435,24 +438,27 @@ func (m *HybridManager) calculateAdaptiveDelay() time.Duration {
 		return m.maxProcessDelay
 	}
 
-	avgFill := totalFill / float64(samples)
+	return processDelayForFill(maxFill, m.minProcessDelay, m.maxProcessDelay)
+}
 
-	// Determine the delay from the fill ratio
+// processDelayForFill maps the fullest buffer to a drain cadence. Pure, so the decision
+// boundary is tested without a client fleet.
+func processDelayForFill(fill float64, minDelay, maxDelay time.Duration) time.Duration {
 	switch {
-	case avgFill >= bufferHighThreshold:
+	case fill >= bufferHighThreshold:
 		// Very full buffers (70%+) — market euphoria: use the minimum delay to drain quickly
-		return m.minProcessDelay
+		return minDelay
 
-	case avgFill >= bufferMedThreshold:
+	case fill >= bufferMedThreshold:
 		// Partially full buffers (30-70%) — moderate activity: interpolate between min and max
 		fillRange := bufferHighThreshold - bufferMedThreshold
-		fillPosition := (avgFill - bufferMedThreshold) / fillRange
-		delayRange := float64(m.maxProcessDelay - m.minProcessDelay)
-		return m.maxProcessDelay - time.Duration(fillPosition*delayRange)
+		fillPosition := (fill - bufferMedThreshold) / fillRange
+		delayRange := float64(maxDelay - minDelay)
+		return maxDelay - time.Duration(fillPosition*delayRange)
 
 	default:
 		// Empty buffers (<30%) — save CPU
-		return m.maxProcessDelay
+		return maxDelay
 	}
 }
 
