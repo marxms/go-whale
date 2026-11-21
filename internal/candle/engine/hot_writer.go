@@ -78,7 +78,8 @@ type HotWriter struct {
 	failedLogged atomic.Bool
 	startOnce    sync.Once
 	// log names the FIRST drop. A counter nobody reads is how a drop stays silent.
-	log *slog.Logger
+	log     *slog.Logger
+	metrics Metrics
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -112,6 +113,12 @@ func WithHotWriterLogger(log *slog.Logger) HotWriterOption {
 	return func(w *HotWriter) { w.log = log }
 }
 
+// WithHotWriterMetrics exports depth, age, drops, failures and coalesces. The first drop is
+// logged; the REST only exist here, so a sustained loss stays observable without a log flood.
+func WithHotWriterMetrics(m Metrics) HotWriterOption {
+	return func(w *HotWriter) { w.metrics = m }
+}
+
 // NewHotWriter builds the writer. The owner starts on the first admission, so an App that never
 // closes a bucket carries no idle goroutine; the caller must Stop it.
 func NewHotWriter(flush HotFlush, opts ...HotWriterOption) *HotWriter {
@@ -137,6 +144,7 @@ func (w *HotWriter) Enqueue(key CompositeKey, c candle.Candle) bool {
 	if w.stopped.Load() {
 		w.mu.Unlock()
 		w.dropped.Add(1)
+		w.metrics.hotWriterDropped()
 		w.noteFirstDrop(bucket, "stopped")
 		return false
 	}
@@ -144,13 +152,16 @@ func (w *HotWriter) Enqueue(key CompositeKey, c candle.Candle) bool {
 	if !exists && len(w.pending)+w.inFlight >= w.capacity {
 		w.mu.Unlock()
 		w.dropped.Add(1)
+		w.metrics.hotWriterDropped()
 		w.noteFirstDrop(bucket, "capacity")
 		return false
 	}
 	if exists {
 		w.coalesced.Add(1)
+		w.metrics.hotWriterCoalesced()
 	}
 	w.pending[bucket] = hotWrite{key: key, candle: c, atMs: time.Now().UnixMilli()}
+	w.publishLocked()
 	// Start under the lock so the WaitGroup Add cannot race the Stop's Wait.
 	w.startOnce.Do(func() {
 		w.wg.Add(1)
@@ -271,9 +282,28 @@ func (w *HotWriter) flushPending(ctx context.Context) {
 	w.mu.Unlock()
 	if err != nil {
 		w.failed.Add(1)
+		w.metrics.hotWriterFailed()
 		w.noteFirstFailure(err)
 		w.requeue(batch)
 	}
+	w.mu.Lock()
+	w.publishLocked()
+	w.mu.Unlock()
+}
+
+// publishLocked exports the current depth and oldest age. Callers hold w.mu.
+func (w *HotWriter) publishLocked() {
+	oldest := w.inFlightOldest
+	for _, entry := range w.pending {
+		if oldest == 0 || entry.atMs < oldest {
+			oldest = entry.atMs
+		}
+	}
+	age := 0.0
+	if oldest > 0 {
+		age = time.Since(time.UnixMilli(oldest)).Seconds()
+	}
+	w.metrics.publishHotWriter(len(w.pending)+w.inFlight, age)
 }
 
 // noteFirstFailure names the FIRST failed flush of the process: a counter nobody reads is how
@@ -302,6 +332,7 @@ func (w *HotWriter) requeue(batch []hotWrite) {
 		}
 		if len(w.pending)+w.inFlight >= w.capacity {
 			w.dropped.Add(1)
+			w.metrics.hotWriterDropped()
 			w.noteFirstDrop(bucket, "requeue-capacity")
 			continue
 		}
@@ -312,6 +343,7 @@ func (w *HotWriter) requeue(batch []hotWrite) {
 // NewHotWriter builds a writer whose flush is the store's own snapshot batch. The writeThrough
 // guard keeps a disabled hot tier a no-op instead of an error on every close.
 func (ts *TieredStore) NewHotWriter(opts ...HotWriterOption) *HotWriter {
+	opts = append(opts, WithHotWriterMetrics(ts.metrics))
 	return NewHotWriter(func(parent context.Context, entries []hotWrite) error {
 		if !ts.writeThrough || ts.redis == nil || len(entries) == 0 {
 			return nil

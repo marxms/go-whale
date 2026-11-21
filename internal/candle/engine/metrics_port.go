@@ -30,6 +30,41 @@ type Metrics struct {
 
 	ColdPendingDepth func(exchange, marketType string, v float64)
 	ColdDurableFalse func(exchange, marketType string)
+
+	// Hot writer: the queue that keeps a slow Redis off the reader. Without these a sustained
+	// drop or a frozen flush is a counter nobody reads.
+	HotWriterDepth         func(v float64)
+	HotWriterOldestPending func(seconds float64)
+	HotWriterDropped       func()
+	HotWriterFailed        func()
+	HotWriterCoalesced     func()
+}
+
+func (m Metrics) hotWriterDropped() {
+	if m.HotWriterDropped != nil {
+		m.HotWriterDropped()
+	}
+}
+
+func (m Metrics) hotWriterFailed() {
+	if m.HotWriterFailed != nil {
+		m.HotWriterFailed()
+	}
+}
+
+func (m Metrics) hotWriterCoalesced() {
+	if m.HotWriterCoalesced != nil {
+		m.HotWriterCoalesced()
+	}
+}
+
+func (m Metrics) publishHotWriter(depth int, oldestSeconds float64) {
+	if m.HotWriterDepth != nil {
+		m.HotWriterDepth(float64(depth))
+	}
+	if m.HotWriterOldestPending != nil {
+		m.HotWriterOldestPending(oldestSeconds)
+	}
 }
 
 func (m Metrics) incColdDurableFalse(exchange, marketType string) {

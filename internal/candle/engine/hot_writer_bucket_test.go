@@ -91,6 +91,7 @@ func TestHotWriterRequeuesFailedBatchKeepingNewerSnapshot(t *testing.T) {
 	written := map[string]float64{}
 	fail := true
 	attempted := make(chan struct{}, 8)
+	var failed int
 	writer := NewHotWriter(
 		func(_ context.Context, entries []hotWrite) error {
 			mu.Lock()
@@ -106,6 +107,7 @@ func TestHotWriterRequeuesFailedBatchKeepingNewerSnapshot(t *testing.T) {
 			return nil
 		},
 		WithHotWriterInterval(time.Millisecond),
+		WithHotWriterMetrics(Metrics{HotWriterFailed: func() { mu.Lock(); failed++; mu.Unlock() }}),
 	)
 	defer func() { _ = writer.Stop(context.Background()) }()
 
@@ -138,5 +140,78 @@ func TestHotWriterRequeuesFailedBatchKeepingNewerSnapshot(t *testing.T) {
 	}
 	if stats := writer.Stats(); stats.Failed != 1 {
 		t.Fatalf("failed = %d, want 1", stats.Failed)
+	}
+	mu.Lock()
+	exported := failed
+	mu.Unlock()
+	if exported != 1 {
+		t.Fatalf("exported failures = %d, want 1", exported)
+	}
+}
+
+// A sustained drop/coalesce must be visible in the metrics, not only in the first log line.
+func TestHotWriterExportsCountersAndDepth(t *testing.T) {
+	var mu sync.Mutex
+	var dropped, coalesced int
+	depth := -1.0
+	oldest := -1.0
+	started := make(chan struct{})
+	release := make(chan struct{})
+	writer := NewHotWriter(
+		func(context.Context, []hotWrite) error {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil
+		},
+		WithHotWriterCapacity(2),
+		WithHotWriterInterval(time.Hour),
+		WithHotWriterMetrics(Metrics{
+			HotWriterDropped:       func() { mu.Lock(); dropped++; mu.Unlock() },
+			HotWriterCoalesced:     func() { mu.Lock(); coalesced++; mu.Unlock() },
+			HotWriterDepth:         func(v float64) { mu.Lock(); depth = v; mu.Unlock() },
+			HotWriterOldestPending: func(s float64) { mu.Lock(); oldest = s; mu.Unlock() },
+		}),
+	)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		_ = writer.Stop(context.Background())
+	}()
+
+	key := hotWriterKey("A")
+	if !writer.Enqueue(key, hotCandleAt(1000, 1)) {
+		t.Fatal("A must be admitted")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("the flush did not start")
+	}
+	if !writer.Enqueue(key, hotCandleAt(1000, 2)) { // same bar: a newer snapshot pending
+		t.Fatal("the newer A must be admitted")
+	}
+	if !writer.Enqueue(key, hotCandleAt(1000, 3)) { // the pending entry is COALESCED
+		t.Fatal("the coalesced A must be admitted")
+	}
+	if writer.Enqueue(hotWriterKey("B"), hotCandleAt(1000, 4)) { // in flight 1 + pending 1 = capacity 2
+		t.Fatal("B beyond the capacity must be dropped")
+	}
+	mu.Lock()
+	gotDropped, gotCoalesced, gotDepth, gotOldest := dropped, coalesced, depth, oldest
+	mu.Unlock()
+	if gotDropped != 1 {
+		t.Fatalf("dropped = %d, want 1", gotDropped)
+	}
+	if gotCoalesced != 1 {
+		t.Fatalf("coalesced = %d, want 1", gotCoalesced)
+	}
+	if gotDepth < 1 || gotOldest < 0 {
+		t.Fatalf("depth/oldest not exported: depth=%v oldest=%v", gotDepth, gotOldest)
 	}
 }

@@ -364,6 +364,21 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 	coldDurableFalse := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cold_durable_false_total", Help: "ColdDurable checks that found the bar not readable from the cold after the apply barrier, by exchange and market type.",
 	}, []string{labelExchange, labelMarketType})
+	hotWriterDepth := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hot_writer_depth", Help: "Closed-bucket snapshots pending or in flight in the single-owner hot write-behind queue.",
+	})
+	hotWriterOldestPending := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hot_writer_oldest_pending_seconds", Help: "Age of the oldest closed-bucket snapshot still waiting for the hot tier. Climbs while Redis is slow or failing.",
+	})
+	hotWriterDropped := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hot_writer_dropped_total", Help: "Closed-bucket snapshots refused by the bounded hot writer queue (first drop also logged).",
+	})
+	hotWriterFailed := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hot_writer_failed_total", Help: "Hot writer flushes that failed; the batch returns to the queue and is retried.",
+	})
+	hotWriterCoalesced := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hot_writer_coalesced_total", Help: "Closed-bucket snapshots replaced by a newer snapshot of the SAME series and bar.",
+	})
 	coldFlushAge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "cold_last_flush_age_seconds",
 		Help: "Seconds since the cold tier (QuestDB) last COMMITTED a batch. Climbs when writes are failing or when no closed candles are being produced; NaN when no cold store is configured. This is the signal that was absent during the 13h silent cold-write outage.",
@@ -503,6 +518,11 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		DurableDimensionsMeasured:     func(v float64) { durableDimensionsMeasured.Set(v) },
 		ColdPendingDepth:              func(ex, mt string, v float64) { coldPendingDepth.WithLabelValues(ex, mt).Set(v) },
 		ColdDurableFalse:              func(ex, mt string) { coldDurableFalse.WithLabelValues(ex, mt).Inc() },
+		HotWriterDepth:                func(v float64) { hotWriterDepth.Set(v) },
+		HotWriterOldestPending:        func(seconds float64) { hotWriterOldestPending.Set(seconds) },
+		HotWriterDropped:              func() { hotWriterDropped.Inc() },
+		HotWriterFailed:               func() { hotWriterFailed.Inc() },
+		HotWriterCoalesced:            func() { hotWriterCoalesced.Inc() },
 	}
 
 	// Derivatives collector.
@@ -773,6 +793,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		lsrShareSumViolation, capabilityAbsent, derivativesColdDegraded, coldPipelineBlocked,
 		coldPipelinePendingRows, coldSeedNoopRows, coldFlushAge, coldPipelineDropped,
 		coldPendingDepth, coldDurableFalse, seriesNonFinite,
+		hotWriterDepth, hotWriterOldestPending, hotWriterDropped, hotWriterFailed, hotWriterCoalesced,
 		// ── Candle engine ─────────────────────────────────────────────────
 		warmSeed, deltaInsideHorizon, appliedDeltaVolume, coldMissingBuckets,
 		coldSymbolsWithGaps, coldSymbolsExpected, coldSymbolsAbsent, durableRows,
