@@ -49,7 +49,7 @@ func firstNonNilErr(errs ...error) error {
 }
 
 // WarmCandleEngine seeds CandleEngine buffers from QuestDB (primary) or Redis (fallback) on startup.
-// ctx is the process lifetime context; the warm-up applies its own 60s ceiling on top of it.
+// ctx is the process lifetime context; the warm-up applies candle_engine.warm_seed_budget_seconds on top of it.
 func WarmCandleEngine(ctx context.Context, eng *CandleEngine, coldStore candle.ColdStore, redis *redisstore.RedisStore, cfg config.Config) {
 	ctx, cancel := context.WithTimeout(ctx, cfg.CandleEngine.WarmSeedBudget())
 	defer cancel()
@@ -87,7 +87,7 @@ func WarmCandleEngine(ctx context.Context, eng *CandleEngine, coldStore candle.C
 			wg.Add(1)
 			go func(s redisstore.SymbolInfo, t string) {
 				defer wg.Done()
-				// Wait for a slot under the WARM-UP's OWN budget (the 60s ctx above), not a
+				// Wait for a slot under the WARM-UP's OWN budget (the configured ctx above), not a
 				// per-task 5s deadline. ~4000 (symbol x timeframe) goroutines are spawned at once
 				// against 16 slots, so most of them queue. A fixed per-task deadline makes queued
 				// work self-destruct in a burst even on a healthy backend, leaving a large share of

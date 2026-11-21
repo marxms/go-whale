@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,6 +92,9 @@ func Load(path string) (Config, error) {
 
 	applyRealtimeEnv(&cfg)
 	applyCoinalyzeEnv(&cfg)
+	if err := applyCandleEngineEnv(&cfg); err != nil {
+		return Config{}, err
+	}
 	applyQuestDBEnv(&cfg)
 	applyDefaults(&cfg)
 	if err := Validate(cfg); err != nil {
@@ -164,9 +168,6 @@ func loadYAML(filename string) (Config, error) {
 
 	// BingxMinIntervalMS is sourced only from the candle_engine section.
 	cfg.BingxMinIntervalMS = yamlCfg.CandleEngine.BingxMinIntervalMS
-	if envBudget := os.Getenv("GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS"); envBudget != "" {
-		cfg.CandleEngine.WarmSeedBudgetSeconds = getEnvInt("GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS", cfg.CandleEngine.WarmSeedBudgetSeconds)
-	}
 
 	// Override with environment variables if present
 	if envPort := os.Getenv("GOWHALE_SERVER_PORT"); envPort != "" {
@@ -198,6 +199,23 @@ func loadYAML(filename string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// applyCandleEngineEnv applies the candle-engine env overrides on BOTH load paths, the same
+// contract applyRealtimeEnv/applyCoinalyzeEnv follow. It returns an error, unlike its siblings:
+// a present-but-invalid warm-seed budget that silently fell back to the default is how a deploy
+// believes it applied a ceiling it never used.
+func applyCandleEngineEnv(cfg *Config) error {
+	raw, ok := os.LookupEnv("GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	seconds, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("config: GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS=%q: %w", raw, err)
+	}
+	cfg.CandleEngine.WarmSeedBudgetSeconds = seconds
+	return nil
 }
 
 // applyRealtimeEnv populates the env-driven realtime edge config on BOTH the YAML and
@@ -267,12 +285,13 @@ func getEnv(key, fallback string) string {
 }
 
 func getEnvInt(key string, fallback int) int {
-	value := os.Getenv(key)
+	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}
-	var parsed int
-	_, err := fmt.Sscanf(value, "%d", &parsed)
+	// strconv.Atoi, not Sscanf: Sscanf accepts a numeric PREFIX, so "120s" became 120 and
+	// "1e3" became 1 — a typo silently applied a different value than the one written.
+	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		return fallback
 	}
@@ -539,8 +558,8 @@ func Validate(cfg Config) error {
 // validateWarmSeedBudget rejects a boot ceiling that is too short to seed the fleet or so
 // long it delays first health past the deploy deadline. Zero is undeclared and allowed.
 func validateWarmSeedBudget(seconds int) error {
-	if seconds != 0 && (seconds < 30 || seconds > 600) {
-		return fmt.Errorf("candle_engine.warm_seed_budget_seconds must be within 30..600, got %d", seconds)
+	if seconds != 0 && (seconds < 30 || seconds > 240) {
+		return fmt.Errorf("candle_engine.warm_seed_budget_seconds must be within 30..240, got %d", seconds)
 	}
 	return nil
 }

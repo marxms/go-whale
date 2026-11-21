@@ -212,7 +212,9 @@ type CandleEngineConfig struct {
 
 	// WarmSeedBudgetSeconds bounds the boot warm-seed pass. It is a BOOT budget, not a
 	// retention: the 60 s it replaces expired with 159 of 499 pairs per timeframe unseeded
-	// in PRD (2026-11-21), while the full fleet needs ~88 s at the measured 45 pairs/s.
+	// in PRD (2026-11-21), while the full fleet needs ~88 s at the measured 45 pairs/s. The
+	// ceiling is 240 s because the HTTP listener starts AFTER the seed: a larger value would
+	// starve the deploy's 300 s health deadline and the 3 min startup grace.
 	WarmSeedBudgetSeconds int `yaml:"warm_seed_budget_seconds,omitempty" json:"warm_seed_budget_seconds,omitempty"`
 
 	// RedisCapByTimeframe is the RESIDENT RETENTION of the candle ZSET, per timeframe. It is
