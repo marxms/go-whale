@@ -327,6 +327,10 @@ const (
 	batchTimeseriesDefaultLimit = 500
 	batchTimeseriesMaxLimit     = 1000
 	batchTimeseriesMaxSymbols   = 1000
+	// The amplification is the PRODUCT, not either factor: 1000 symbols x 1000 candles is a
+	// million members materialized in one unauthenticated request. The ceiling is per request;
+	// a caller that needs more pages.
+	batchTimeseriesMaxCandles = 10_000
 )
 
 // GetBatchTimeseries serves GET /api/batch/timeseries?exchange=binance&marketType=future&timeframe=5m&limit=500&symbols=BTC/USDT,ETH/USDT
@@ -351,6 +355,13 @@ func (h *Handler) GetBatchTimeseries(w http.ResponseWriter, r *http.Request) {
 		}
 		timeframe = h.tfReg.Default()
 	}
+	if h.tfReg != nil && !h.tfReg.IsSupported(timeframe) {
+		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{
+			responseKeyError: "unsupported timeframe",
+			"code":           "invalid_timeframe",
+		})
+		return
+	}
 
 	limit := batchTimeseriesDefaultLimit
 	if raw := query.Get("limit"); raw != "" {
@@ -374,6 +385,13 @@ func (h *Handler) GetBatchTimeseries(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(symbols) > batchTimeseriesMaxSymbols {
 		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{responseKeyError: "too many symbols"})
+		return
+	}
+	if len(symbols)*limit > batchTimeseriesMaxCandles {
+		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{
+			responseKeyError: "batch too large",
+			"code":           "batch_too_large",
+		})
 		return
 	}
 
