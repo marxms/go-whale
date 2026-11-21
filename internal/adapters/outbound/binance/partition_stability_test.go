@@ -37,12 +37,12 @@ func TestNotePartitionReconnectTracksShortLivedSockets(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 
 	c.markPartitionUp(0)
-	delay, streak := c.notePartitionReconnect(0)
+	delay, streak := c.notePartitionReconnect(0, time.Now())
 	if delay != reconnectBackoffBase || streak != 1 {
 		t.Fatalf("first short reconnect = (%v, %d), want (%v, 1)", delay, streak, reconnectBackoffBase)
 	}
 	c.markPartitionUp(0)
-	delay, streak = c.notePartitionReconnect(0)
+	delay, streak = c.notePartitionReconnect(0, time.Now())
 	if delay != reconnectBackoffBase*2 || streak != 2 {
 		t.Fatalf("second short reconnect = (%v, %d), want (%v, 2)", delay, streak, reconnectBackoffBase*2)
 	}
@@ -51,7 +51,7 @@ func TestNotePartitionReconnectTracksShortLivedSockets(t *testing.T) {
 	c.partitionStabilityMu.Lock()
 	c.partitionUpSince[0] = time.Now().Add(-2 * reconnectStabilityFloor)
 	c.partitionStabilityMu.Unlock()
-	delay, streak = c.notePartitionReconnect(0)
+	delay, streak = c.notePartitionReconnect(0, time.Now())
 	if delay != 0 || streak != 0 {
 		t.Fatalf("stable reconnect = (%v, %d), want (0, 0)", delay, streak)
 	}
@@ -65,12 +65,35 @@ func TestPartitionReconnectPathUsesTheStabilityDelay(t *testing.T) {
 		t.Fatalf("reading adapter.go: %v", err)
 	}
 	text := string(source)
-	if !strings.Contains(text, "notePartitionReconnect(pid)") {
-		t.Fatal("reconnectOnePartition no longer arms the stability delay")
-	}
-	for _, want := range []string{"markPartitionUp(pid)", "markPartitionUp(i)"} {
+	for _, want := range []string{
+		"notePartitionReconnect(req.partition, req.at)",
+		"time.AfterFunc(delay",
+		"markPartitionUp(pid)",
+		"markPartitionUp(i)",
+		"c.disconnectTime.Store(req.at)",
+	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("a successful dial no longer records its start: %s missing", want)
+			t.Fatalf("the reconnect path lost a required piece: %s missing", want)
 		}
+	}
+}
+
+// A request older than the live socket is stale: the partition was already restored after the
+// failure it names. Acting on it tears down a healthy connection — the pattern 77cdeab fought.
+func TestPartitionAlreadyRestoredDetectsStaleRequests(t *testing.T) {
+	c := NewSDKClient(streaming.ClientConfig{TradeBufferSize: 10, MarketType: "swap"})
+	t.Cleanup(func() { _ = c.Close() })
+	up := time.Now()
+	c.partitionStabilityMu.Lock()
+	c.partitionUpSince[0] = up
+	c.partitionStabilityMu.Unlock()
+	if !c.partitionAlreadyRestored(0, up.Add(-time.Second)) {
+		t.Fatal("a request observed before the live socket was not stale")
+	}
+	if c.partitionAlreadyRestored(0, up.Add(time.Second)) {
+		t.Fatal("a request observed after the live socket was treated as stale")
+	}
+	if c.partitionAlreadyRestored(1, up) {
+		t.Fatal("a partition with no recorded socket was treated as restored")
 	}
 }

@@ -196,12 +196,18 @@ func (c *SDKClient) closed() bool { return c.ctx != nil && c.ctx.Err() != nil }
 type reconnectRequest struct {
 	partition int
 	reason    string
+	// at is when the failure was OBSERVED. The gap-recovery window starts here, not when the
+	// reconnect happens to run: a stability delay must not hide the tape lost while it waits.
+	at time.Time
+	// delayed marks a request already re-enqueued after the stability delay, so it is not
+	// delayed again (which would double-count the streak).
+	delayed bool
 }
 
 // requestReconnect signals the reconnect worker without blocking (deduped by the buffered channel).
 func (c *SDKClient) requestReconnect(partition int, reason string) {
 	select {
-	case c.reconnectCh <- reconnectRequest{partition: partition, reason: reason}:
+	case c.reconnectCh <- reconnectRequest{partition: partition, reason: reason, at: time.Now()}:
 	default:
 		// A reconnect is already queued/running — the signal was dropped.
 		// Surface it as a metric so reconnect churn is observable.
@@ -854,7 +860,7 @@ func partitionReconnectDelay(upFor time.Duration, streak int) time.Duration {
 
 // notePartitionReconnect classifies the previous socket's lifetime and arms the stability
 // delay for this reconnect. The streak resets as soon as a socket proves it can live.
-func (c *SDKClient) notePartitionReconnect(pid int) (time.Duration, int) {
+func (c *SDKClient) notePartitionReconnect(pid int, at time.Time) (time.Duration, int) {
 	c.partitionStabilityMu.Lock()
 	defer c.partitionStabilityMu.Unlock()
 	if c.partitionUpSince == nil {
@@ -867,7 +873,10 @@ func (c *SDKClient) notePartitionReconnect(pid int) (time.Duration, int) {
 	next := c.partitionShortStreak[pid] + 1
 	upFor := time.Duration(0)
 	if seen {
-		upFor = time.Since(up)
+		if at.IsZero() {
+			at = time.Now()
+		}
+		upFor = at.Sub(up)
 	}
 	if delay := partitionReconnectDelay(upFor, next); delay > 0 {
 		c.partitionShortStreak[pid] = next
@@ -875,6 +884,15 @@ func (c *SDKClient) notePartitionReconnect(pid int) (time.Duration, int) {
 	}
 	c.partitionShortStreak[pid] = 0
 	return 0, 0
+}
+
+// partitionAlreadyRestored reports whether the partition's live socket was established AFTER the
+// request was observed — the error it names is already healed.
+func (c *SDKClient) partitionAlreadyRestored(pid int, at time.Time) bool {
+	c.partitionStabilityMu.Lock()
+	defer c.partitionStabilityMu.Unlock()
+	up, ok := c.partitionUpSince[pid]
+	return ok && up.After(at)
 }
 
 // markPartitionUp records a successful partition dial. It does not reset the streak: the next
@@ -889,7 +907,10 @@ func (c *SDKClient) markPartitionUp(pid int) {
 }
 
 func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
-	symbols := c.ledger.SymbolsForPartition(pid)
+	// Read at RECONNECT time, not when the failure was observed: the old capture happened
+	// before a stability delay of up to 30 s, so an unsubscribe during the wait was undone by
+	// the redial (a deranked symbol resurrected) and a subscribe was lost (no producer).
+	symbols := c.livePartitionSymbols(pid)
 	if len(symbols) == 0 {
 		return false
 	}
@@ -903,15 +924,6 @@ func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
 	connCtx := c.connCtx
 	c.connectMu.Unlock()
 
-	if delay, streak := c.notePartitionReconnect(pid); delay > 0 {
-		logger.OrDiscard(c.log).Warn("binance sdk: partition reconnect delayed for stability",
-			"partition", pid, "delay", delay, "short_streak", streak, "reason", reason)
-		select {
-		case <-time.After(delay):
-		case <-c.ctx.Done():
-			return true
-		}
-	}
 	logger.OrDiscard(c.log).Warn("binance sdk: reconnecting ONE partition",
 		"partition", pid, "symbols", len(symbols), "reason", reason)
 	if err := victim.Close(); err != nil {
@@ -938,6 +950,14 @@ func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
 
 	c.markPartitionUp(pid)
 	c.connectMu.Lock()
+	if c.ctx.Err() != nil {
+		// Close canceled the lifecycle before this dial published: the new socket must not
+		// outlive the client. Cancellation happens BEFORE Close takes connectMu, so this check
+		// and Close's sweep cannot both miss it.
+		c.connectMu.Unlock()
+		_ = conn.Close()
+		return true
+	}
 	c.partitions[pid] = conn
 	if pid == 0 {
 		c.wsConn = conn
@@ -956,6 +976,24 @@ func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
 	}
 	c.triggerGapRecovery(symbols)
 	return true
+}
+
+// livePartitionSymbols intersects the ledger's partition membership with the CURRENT subscription
+// set, so a redial never resurrects a symbol the operator removed while it waited.
+func (c *SDKClient) livePartitionSymbols(pid int) []string {
+	members := c.ledger.SymbolsForPartition(pid)
+	if len(members) == 0 {
+		return nil
+	}
+	c.symbolsMu.RLock()
+	defer c.symbolsMu.RUnlock()
+	out := make([]string, 0, len(members))
+	for _, sym := range members {
+		if c.symbols[sym] {
+			out = append(out, sym)
+		}
+	}
+	return out
 }
 
 // closeAllConnections closes every live WebSocket connection: all combined-URL
@@ -1007,6 +1045,36 @@ func (c *SDKClient) reconnectDial(symbols []string) (int, error) {
 // On the combined-URL path the server subscribes on the handshake (frame-free).
 func (c *SDKClient) reconnectAndResubscribe(req reconnectRequest) {
 	reason := req.reason
+
+	// A request older than the live socket is stale: the partition was already restored after
+	// the error that produced it. Processing it would tear down a healthy connection.
+	if req.partition >= 0 && !req.at.IsZero() && c.partitionAlreadyRestored(req.partition, req.at) {
+		logger.OrDiscard(c.log).Debug("binance sdk: stale reconnect request ignored",
+			"partition", req.partition, "reason", reason)
+		return
+	}
+
+	// The stability delay is taken BEFORE the reconnect lock and the reconnecting flag: a
+	// partition flapping must not serialize recovery of the others, nor make the whole client
+	// report "reconnecting" while it merely waits. The worker is released; the request returns
+	// on the timer.
+	if req.partition >= 0 && !req.delayed {
+		if delay, streak := c.notePartitionReconnect(req.partition, req.at); delay > 0 {
+			logger.OrDiscard(c.log).Warn("binance sdk: partition reconnect delayed for stability",
+				"partition", req.partition, "delay", delay, "short_streak", streak, "reason", reason)
+			req.delayed = true
+			time.AfterFunc(delay, func() {
+				select {
+				case <-c.ctx.Done():
+				case c.reconnectCh <- req:
+				default:
+					c.metrics.incReconnectSignalDropped(venueBinance, marketTypeFuture)
+				}
+			})
+			return
+		}
+	}
+
 	if c.reconnecting.Load() {
 		// Warn so the skip is visible under log_level=warn.
 		logger.OrDiscard(c.log).Warn("binance sdk: reconnect already in progress; skipping")
@@ -1032,6 +1100,11 @@ func (c *SDKClient) reconnectAndResubscribe(req reconnectRequest) {
 		return
 	default:
 	}
+
+	// The window starts when the failure was observed. The partition path never recorded it, so
+	// the FIRST socket failure after boot skipped gap recovery entirely; the fleet path recorded
+	// it late, shortening the window by the whole rebuild.
+	c.disconnectTime.Store(req.at)
 
 	// A partition-scoped request is honoured only when the partition and its members are known.
 	// Otherwise the fleet path runs, because redialing a partition with the wrong symbol list is
@@ -1069,7 +1142,6 @@ func (c *SDKClient) reconnectAndResubscribe(req reconnectRequest) {
 	// Mark disconnected before abandoning the transport and its handlers.
 	c.connected.Store(false)
 	c.lastMessageAt.Store(time.Time{}) // zero time to force health check detection
-	c.disconnectTime.Store(time.Now())
 
 	// Decouple gap-recovery enqueue from reconnect SUCCESS: enqueue the window on
 	// EVERY exit path below (including a failed Connect() or partial resubscribe),
@@ -1308,7 +1380,15 @@ func (c *SDKClient) Close() error {
 	// Step 1: Cancel client lifecycle → stops all goroutines
 	c.cancel()
 
-	// Step 2: Cancel connection context (redundant but defensive).
+	// Step 2: Join the RECONNECT WORKER before sweeping the connections. It is the only caller
+	// of reconnectOnePartition, and that path publishes a fresh socket under connectMu after its
+	// dial returns. Sweeping first left a window in which the worker published a connection AFTER
+	// closeAllConnections had copied the set — the socket, its read loop and its renewal loop
+	// outlived Close, and connWg.Wait returned before their Add. Cancellation aborts the dial and
+	// the stability sleep, so this join is bounded.
+	c.wg.Wait()
+
+	// Step 3: Cancel connection context (redundant but defensive).
 	// Read connCancel under connectMu — connectLocked writes it under the same lock from the
 	// reconnect worker, so an unguarded read here is a data race.
 	c.connectMu.Lock()
@@ -1321,12 +1401,12 @@ func (c *SDKClient) Close() error {
 		cancel()
 	}
 
-	// Step 3: Release raw transports before joining connection goroutines.
+	// Step 4: Release raw transports before joining connection goroutines.
 	c.closeAllConnections()
 
-	// Step 4: Wait for ALL goroutines to exit.
+	// Step 5: Wait for the connection-scoped goroutines. No Add can race this Wait: the only
+	// reconnect path that adds them has already been joined.
 	c.connWg.Wait()
-	c.wg.Wait()
 
 	// Update metrics
 	c.metrics.setGoroutines(venueBinance, marketTypeFuture, float64(runtime.NumGoroutine()))
