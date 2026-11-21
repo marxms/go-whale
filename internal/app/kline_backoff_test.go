@@ -64,3 +64,66 @@ func TestKlineBackoffIsBoundedAndNotFixed30s(t *testing.T) {
 		t.Fatalf("probe = %v/%v, want the terminal state published", exhausted, configured)
 	}
 }
+
+// The delay is only real if it is HONORED: the test above zeroes klineNextAttempt every tick,
+// so removing the deadline check would keep it green while the feed dialed at the fixed 30 s
+// cadence this bound removed.
+func TestKlineBackoffIsHonoredBeforeTheNextDial(t *testing.T) {
+	starts := 0
+	app := &App{
+		streamCtx:    context.Background(),
+		klineFeed:    &controlledKlineFeed{have: true, silent: 600},
+		klineSymbols: []string{"BTC/USDT"},
+		newKlineFeed: func(context.Context, string, string, string, func(string, candle.Candle)) klineFeed {
+			starts++
+			return &controlledKlineFeed{
+				have:   true,
+				silent: 600,
+				start:  func([]string) error { return errors.New("dial refused") },
+			}
+		},
+	}
+	app.restartKlineFeedIfSilent(context.Background(), "binance", "future")
+	if starts != 1 {
+		t.Fatalf("first tick dials = %d, want 1", starts)
+	}
+	if app.klineNextAttempt.IsZero() || !app.klineNextAttempt.After(time.Now()) {
+		t.Fatalf("next attempt = %v, want a future deadline after the failure", app.klineNextAttempt)
+	}
+
+	app.restartKlineFeedIfSilent(context.Background(), "binance", "future")
+	if starts != 1 {
+		t.Fatalf("a tick inside the backoff dialed again (%d starts): the deadline is not honored", starts)
+	}
+
+	app.klineNextAttempt = time.Now().Add(-time.Second)
+	app.restartKlineFeedIfSilent(context.Background(), "binance", "future")
+	if starts != 2 {
+		t.Fatalf("a tick after the deadline did not dial (%d starts)", starts)
+	}
+}
+
+// A feed that stayed healthy must clear the failure count; one that has not yet reached the
+// stability window must preserve it.
+func TestKlineHealthyResetsFailuresOnlyAfterTheStabilityWindow(t *testing.T) {
+	stable := &App{
+		klineHealthySince:       time.Now().Add(-time.Hour),
+		klineFailures:           5,
+		klineReconnectExhausted: true,
+	}
+	stable.noteKlineHealthy()
+	if stable.klineFailures != 0 || stable.klineReconnectExhausted {
+		t.Fatalf("stable feed kept failures=%d exhausted=%v", stable.klineFailures, stable.klineReconnectExhausted)
+	}
+
+	young := &App{
+		klineHealthySince:       time.Now(),
+		klineFailures:           5,
+		klineReconnectExhausted: true,
+	}
+	young.noteKlineHealthy()
+	if young.klineFailures != 5 || !young.klineReconnectExhausted {
+		t.Fatalf("young feed reset failures=%d exhausted=%v before the stability window",
+			young.klineFailures, young.klineReconnectExhausted)
+	}
+}
