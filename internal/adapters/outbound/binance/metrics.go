@@ -40,6 +40,10 @@ const (
 	reconnectBackoffBase = 1 * time.Second
 	reconnectBackoffMax  = 30 * time.Second
 	reconnectBackoffRate = 2.0
+	// reconnectStabilityFloor is how long a partition socket must have lived before a new
+	// reconnect may dial immediately. Below it, the reconnect pays the same exponential
+	// backoff a failed dial pays: a dial that succeeds and dies in seconds must not reset it.
+	reconnectStabilityFloor = 30 * time.Second
 )
 
 // socketCleanupDelay is how long reconnectAndResubscribe waits after closing the

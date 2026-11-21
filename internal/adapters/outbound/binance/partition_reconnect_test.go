@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -93,7 +94,10 @@ func TestReconnectOnePartitionKeepsTheSister(t *testing.T) {
 	if ev := victim.CloseEvidence(); ev.Initiator != binancews.InitiatorLocalShutdown {
 		t.Fatalf("victim evidence = %+v, want OUR close recorded on the victim only", ev)
 	}
-	if connections.Load() <= before {
+	// The server's counter is incremented by its own handler goroutine after the upgrade; a
+	// direct read here raced it once the stability delay changed the interleaving. Waiting keeps
+	// the assertion (a NEW connection must arrive) without depending on scheduler order.
+	if !waitFor(t, 2*time.Second, func() bool { return connections.Load() > before }) {
 		t.Fatal("the victim was not re-dialed: no new connection reached the server")
 	}
 	if got := c.ledger.SymbolsForPartition(0); len(got) != len(members) {

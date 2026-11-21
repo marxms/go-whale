@@ -79,6 +79,13 @@ type SDKClient struct {
 	// socket used to be routed as a string and lost its identity, so the handler closed both
 	// partitions for one partition's fault.
 	reconnectCh chan reconnectRequest
+	// Partition reconnect stability. The backoff engaged only on a FAILED dial; a dial that
+	// succeeded and died seconds later reset it. Measured in PRD on 2026-11-21: 7 reconnects
+	// in 17 s, each new socket alive 1-4 s, ~214k tape trades lost and repaired. A socket
+	// must live reconnectStabilityFloor before the next reconnect dials immediately.
+	partitionStabilityMu sync.Mutex
+	partitionUpSince     map[int]time.Time
+	partitionShortStreak map[int]int
 
 	// State
 	connected     atomic.Bool
@@ -153,6 +160,8 @@ func NewSDKClient(config streaming.ClientConfig, logs ...*slog.Logger) *SDKClien
 		livenessLedgerEnabled:     true,
 		netdiag:                   netdiag.New(),
 		reconnectCh:               make(chan reconnectRequest, 1),
+		partitionUpSince:          make(map[int]time.Time),
+		partitionShortStreak:      make(map[int]int),
 		ctx:                       ctx,
 		cancel:                    cancel,
 		pacer:                     newSubscribePacer(subscribeMinInterval),
@@ -568,6 +577,7 @@ func (c *SDKClient) connectAndResubscribeCombined(symbols []string) (int, error)
 			return 0, fmt.Errorf("combined-URL connect failed (partition %d/%d, %d streams): %w", i+1, len(parts), len(slice), err)
 		}
 		clients = append(clients, conn)
+		c.markPartitionUp(i)
 		resubscribed += len(part)
 	}
 
@@ -824,6 +834,60 @@ func recordResubscribeOutcome(metrics Metrics, market string, total, resubscribe
 // every dynamic Subscribe — the only structure that sees all ownership changes.
 //
 // The caller holds reconnectMu and has set reconnecting, so this cannot race a fleet rebuild.
+// partitionReconnectDelay returns how long a reconnect must wait before dialing. A socket
+// that lived at least the stability floor resets the streak and dials at once; a short-lived
+// one pays the same exponential backoff a failed dial pays, so a flapping endpoint cannot turn
+// into a reconnect storm.
+func partitionReconnectDelay(upFor time.Duration, streak int) time.Duration {
+	if streak <= 0 || upFor >= reconnectStabilityFloor {
+		return 0
+	}
+	delay := reconnectBackoffBase
+	for i := 1; i < streak; i++ {
+		delay = time.Duration(float64(delay) * reconnectBackoffRate)
+		if delay >= reconnectBackoffMax {
+			return reconnectBackoffMax
+		}
+	}
+	return delay
+}
+
+// notePartitionReconnect classifies the previous socket's lifetime and arms the stability
+// delay for this reconnect. The streak resets as soon as a socket proves it can live.
+func (c *SDKClient) notePartitionReconnect(pid int) (time.Duration, int) {
+	c.partitionStabilityMu.Lock()
+	defer c.partitionStabilityMu.Unlock()
+	if c.partitionUpSince == nil {
+		c.partitionUpSince = make(map[int]time.Time)
+	}
+	if c.partitionShortStreak == nil {
+		c.partitionShortStreak = make(map[int]int)
+	}
+	up, seen := c.partitionUpSince[pid]
+	next := c.partitionShortStreak[pid] + 1
+	upFor := time.Duration(0)
+	if seen {
+		upFor = time.Since(up)
+	}
+	if delay := partitionReconnectDelay(upFor, next); delay > 0 {
+		c.partitionShortStreak[pid] = next
+		return delay, next
+	}
+	c.partitionShortStreak[pid] = 0
+	return 0, 0
+}
+
+// markPartitionUp records a successful partition dial. It does not reset the streak: the next
+// reconnect decides from how long THIS socket lived.
+func (c *SDKClient) markPartitionUp(pid int) {
+	c.partitionStabilityMu.Lock()
+	if c.partitionUpSince == nil {
+		c.partitionUpSince = make(map[int]time.Time)
+	}
+	c.partitionUpSince[pid] = time.Now()
+	c.partitionStabilityMu.Unlock()
+}
+
 func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
 	symbols := c.ledger.SymbolsForPartition(pid)
 	if len(symbols) == 0 {
@@ -839,6 +903,15 @@ func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
 	connCtx := c.connCtx
 	c.connectMu.Unlock()
 
+	if delay, streak := c.notePartitionReconnect(pid); delay > 0 {
+		logger.OrDiscard(c.log).Warn("binance sdk: partition reconnect delayed for stability",
+			"partition", pid, "delay", delay, "short_streak", streak, "reason", reason)
+		select {
+		case <-time.After(delay):
+		case <-c.ctx.Done():
+			return true
+		}
+	}
 	logger.OrDiscard(c.log).Warn("binance sdk: reconnecting ONE partition",
 		"partition", pid, "symbols", len(symbols), "reason", reason)
 	if err := victim.Close(); err != nil {
@@ -863,6 +936,7 @@ func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
 		return false
 	}
 
+	c.markPartitionUp(pid)
 	c.connectMu.Lock()
 	c.partitions[pid] = conn
 	if pid == 0 {
