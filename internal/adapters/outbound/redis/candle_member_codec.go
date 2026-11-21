@@ -55,11 +55,16 @@ import (
 // Redis does not.
 
 const (
-	// candleMemberVersion is the version THIS binary writes.
-	candleMemberVersion = "v1"
-	// candleMemberFieldCount includes the version itself and the `timestamp`.
-	candleMemberFieldCount = 20
-	candleMemberSep        = "|"
+	// candleMemberVersion is the version THIS binary writes. v2 adds the gap CAUSE as the
+	// 21st field; v1 (without it) remains readable so a rollout does not strand rows. An
+	// unknown version still fails LOUD: reverting the binary after v2 writes must be a
+	// deliberate roll-forward, not a short window served as complete.
+	candleMemberVersion    = "v2"
+	candleMemberVersionV1  = "v1"
+	candleMemberFieldCount = 21
+	// candleMemberFieldCountV1 is the pre-gapKind member, still read during the rollout.
+	candleMemberFieldCountV1 = 20
+	candleMemberSep          = "|"
 )
 
 // ErrCandleMemberUnknownVersion marks a member written by a version this binary does not read.
@@ -177,6 +182,7 @@ func encodeCandleMember(c candle.Candle) (string, error) {
 		candleInt(c.SideUnknownCount),
 		candleInt(c.LateTradeCount),
 		candleBool(c.HasGap),
+		candleGapKindToken(c.GapKind),
 	)
 
 	return strings.Join(fields, candleMemberSep), nil
@@ -205,18 +211,22 @@ func decodeCandleMember(raw string) (candle.Candle, error) {
 	}
 
 	fields := strings.Split(raw, candleMemberSep)
-	if fields[0] != candleMemberVersion {
+	if fields[0] != candleMemberVersion && fields[0] != candleMemberVersionV1 {
 		return c, &CandleMemberDecodeError{
 			Version: fields[0],
-			Reason:  fmt.Sprintf("this binary only reads %q", candleMemberVersion),
+			Reason:  fmt.Sprintf("this binary reads %q and %q", candleMemberVersion, candleMemberVersionV1),
 			Sample:  candleMemberSample(raw),
 			cause:   ErrCandleMemberUnknownVersion,
 		}
 	}
-	if len(fields) != candleMemberFieldCount {
+	want := candleMemberFieldCount
+	if fields[0] == candleMemberVersionV1 {
+		want = candleMemberFieldCountV1
+	}
+	if len(fields) != want {
 		return c, &CandleMemberDecodeError{
 			Version: fields[0],
-			Reason:  fmt.Sprintf("%d fields, want %d", len(fields), candleMemberFieldCount),
+			Reason:  fmt.Sprintf("%d fields, want %d", len(fields), want),
 			Sample:  candleMemberSample(raw),
 			cause:   ErrCandleMemberMalformed,
 		}
@@ -244,6 +254,9 @@ func decodeCandleMember(raw string) (candle.Candle, error) {
 	c.SideUnknownCount, bad = candleParseInt(fields[17], bad)
 	c.LateTradeCount, bad = candleParseInt(fields[18], bad)
 	c.HasGap, bad = candleParseBool(fields[19], bad)
+	if fields[0] == candleMemberVersion {
+		c.GapKind, bad = candleParseGapKind(fields[20], bad)
+	}
 
 	if bad != nil {
 		return candle.Candle{}, &CandleMemberDecodeError{
@@ -304,6 +317,36 @@ func candleParseInt(raw string, prev error) (int64, error) {
 		return 0, fmt.Errorf("int %q: %w", raw, err)
 	}
 	return parsed, nil
+}
+
+// candleGapKindToken encodes the cause in one field: empty for unknown (v1-compatible),
+// "v" for volume-only and "p" for provisional. The zero kind stays empty so a v2 member
+// for an unmarked or unknown-cause bar is byte-compatible with its v1 counterpart.
+func candleGapKindToken(k candle.GapKind) string {
+	switch k {
+	case candle.GapVolumeIncomplete:
+		return "v"
+	case candle.GapProvisional:
+		return "p"
+	default:
+		return ""
+	}
+}
+
+func candleParseGapKind(raw string, prev error) (candle.GapKind, error) {
+	if prev != nil {
+		return candle.GapUnknown, prev
+	}
+	switch raw {
+	case "":
+		return candle.GapUnknown, nil
+	case "v":
+		return candle.GapVolumeIncomplete, nil
+	case "p":
+		return candle.GapProvisional, nil
+	default:
+		return candle.GapUnknown, fmt.Errorf("gapKind %q: want empty, \"v\" or \"p\"", raw)
+	}
 }
 
 func candleParseBool(raw string, prev error) (bool, error) {

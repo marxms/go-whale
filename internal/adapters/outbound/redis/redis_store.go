@@ -1057,6 +1057,7 @@ func mergeOpenCandleBySource(current, incoming candle.Candle, source CandleMerge
 		if incoming.AggregateMethod != "" {
 			snapMethod = incoming.AggregateMethod
 		}
+		gapMark, gapKind := candle.MergeGapMark(current, incoming)
 		return candle.Candle{
 			Timestamp:        incoming.Timestamp,
 			Open:             openMerged,
@@ -1072,7 +1073,8 @@ func mergeOpenCandleBySource(current, incoming candle.Candle, source CandleMerge
 			AggregateMethod:  snapMethod,
 			SideUnknownCount: incoming.SideUnknownCount,
 			LateTradeCount:   incoming.LateTradeCount,
-			HasGap:           current.HasGap || incoming.HasGap,
+			HasGap:           gapMark,
+			GapKind:          gapKind,
 		}
 	}
 
@@ -1105,7 +1107,7 @@ func mergeOpenCandleBySource(current, incoming candle.Candle, source CandleMerge
 	if incoming.AggregateMethod != "" {
 		aggregateMethod = incoming.AggregateMethod
 	}
-	hasGap := current.HasGap || incoming.HasGap
+	hasGap, gapKind := candle.MergeGapMark(current, incoming)
 
 	return candle.Candle{
 		Timestamp:  incoming.Timestamp,
@@ -1124,6 +1126,7 @@ func mergeOpenCandleBySource(current, incoming candle.Candle, source CandleMerge
 		SideUnknownCount: sideUnknownCount,
 		LateTradeCount:   lateTradeCount,
 		HasGap:           hasGap,
+		GapKind:          gapKind,
 	}
 }
 
@@ -1149,6 +1152,10 @@ func mergeClosedCandleBySource(current, incoming candle.Candle, source CandleMer
 	if takerBuy+takerSell <= 0 {
 		takerBuy, takerSell = current.TakerBuyVolume, current.TakerSellVolume
 	}
+	// A late, clean record must not erase a mark: mergeClosedCandleBySource is reached by a
+	// WS delta (AddStreamingCandlesBatch) as well as by authoritative sources, and the mark
+	// survives unless an authority settles it.
+	gapMark, gapKind := candle.MergeGapMark(current, incoming)
 
 	return candle.Candle{
 		Timestamp:  incoming.Timestamp,
@@ -1166,7 +1173,8 @@ func mergeClosedCandleBySource(current, incoming candle.Candle, source CandleMer
 		AggregateMethod:  incoming.AggregateMethod,
 		SideUnknownCount: incoming.SideUnknownCount,
 		LateTradeCount:   incoming.LateTradeCount,
-		HasGap:           incoming.HasGap,
+		HasGap:           gapMark,
+		GapKind:          gapKind,
 	}
 }
 
