@@ -178,6 +178,7 @@ type TimeframeFreshnessReport struct {
 	Scope        string `json:"scope"`
 	Timeframe    string `json:"timeframe"`
 	NewestAgoMs  int64  `json:"newest_ago_ms"`
+	HaveData     bool   `json:"have_data"`
 	StaleAfterMs int64  `json:"stale_after_ms"`
 	Stale        bool   `json:"stale"`
 }
@@ -482,6 +483,7 @@ func (a *Aggregator) Evaluate() Report {
 	// restarting the process to fix it would destroy the rings without repairing the fold.
 	var timeframeFreshness []TimeframeFreshnessReport
 	frozenTimeframes := 0
+	noDataTimeframes := 0
 	if a.probes.TimeframeFreshness != nil {
 		rows, configured := a.probes.TimeframeFreshness()
 		if configured {
@@ -491,11 +493,17 @@ func (a *Aggregator) Evaluate() Report {
 					Scope:        row.Scope,
 					Timeframe:    row.Timeframe,
 					NewestAgoMs:  row.NewestAgeMs,
+					HaveData:     row.HaveData,
 					StaleAfterMs: row.StaleAfterMs,
 				}
 				detail.Stale = row.HaveData && row.StaleAfterMs > 0 && row.NewestAgeMs > row.StaleAfterMs
 				if detail.Stale {
 					frozenTimeframes++
+				}
+				// "Never had data" is not "fresh": after the grace, a configured timeframe that
+				// never produced a bucket is a silent freeze of its own.
+				if !row.HaveData && elapsed > StartupGrace {
+					noDataTimeframes++
 				}
 				timeframeFreshness = append(timeframeFreshness, detail)
 			}
@@ -508,11 +516,15 @@ func (a *Aggregator) Evaluate() Report {
 		}
 	}
 	if timeframeFreshness != nil {
-		if frozenTimeframes > 0 {
+		if frozenTimeframes > 0 || noDataTimeframes > 0 {
+			reason := fmt.Sprintf("%d frozen timeframe(s)", frozenTimeframes)
+			if noDataTimeframes > 0 {
+				reason = fmt.Sprintf("%s, %d with no data", reason, noDataTimeframes)
+			}
 			components = append(components, ComponentReport{
 				Name:   componentTimeframeFreshness,
 				State:  ComponentDegraded,
-				Reason: fmt.Sprintf("%d frozen timeframe(s)", frozenTimeframes),
+				Reason: reason,
 			})
 			if status == statusHealthy {
 				status = statusDegraded

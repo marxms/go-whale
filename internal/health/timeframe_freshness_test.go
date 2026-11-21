@@ -61,10 +61,44 @@ func TestFrozenTimeframeDegradesWithoutGoing503(t *testing.T) {
 	}
 }
 
-// A timeframe nobody wrote is absent, not frozen: a scope that does not serve 1w must not alarm.
-func TestTimeframeWithoutDataDoesNotDegrade(t *testing.T) {
+// The probe lists the timeframes the engine SERVES. After the startup grace, one that never
+// produced a bucket is a silent freeze, not "absent" — the old contract reported it healthy and
+// made a frozen derived timeframe indistinguishable from a fresh one.
+func TestTimeframeWithoutDataAfterGraceDegrades(t *testing.T) {
 	agg := NewAggregator(Probes{
 		StartedAt: func() time.Time { return time.Now().Add(-time.Hour) },
+		Connections: func() []Connection {
+			return []Connection{{Exchange: "binance", MarketType: "future", Connected: true, Healthy: true, Symbols: 1}}
+		},
+		TimeframeFreshness: func() ([]TimeframeFreshness, bool) {
+			return []TimeframeFreshness{
+				{Scope: "binance:future", Timeframe: "1w", StaleAfterMs: 28 * 24 * 3_600_000, HaveData: false},
+			}, true
+		},
+	})
+
+	report := agg.Evaluate()
+	if report.Status != statusDegraded {
+		t.Fatalf("status = %q, want degraded: a served timeframe with no data after the grace", report.Status)
+	}
+	found := false
+	for _, detail := range report.TimeframeFreshness {
+		if detail.Timeframe == "1w" {
+			found = true
+			if detail.HaveData {
+				t.Fatal("have_data = true for a timeframe with no data")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("timeframe 1w missing from the detail")
+	}
+}
+
+// Within the startup grace the same row is not a verdict: the first bucket may still be forming.
+func TestTimeframeWithoutDataDuringGraceIsLenient(t *testing.T) {
+	agg := NewAggregator(Probes{
+		StartedAt: func() time.Time { return time.Now().Add(-5 * time.Second) },
 		Connections: func() []Connection {
 			return []Connection{{Exchange: "binance", MarketType: "future", Connected: true, Healthy: true, Symbols: 1}}
 		},
@@ -76,8 +110,8 @@ func TestTimeframeWithoutDataDoesNotDegrade(t *testing.T) {
 	})
 
 	report := agg.Evaluate()
-	if report.Status != statusHealthy {
-		t.Fatalf("status = %q, want healthy", report.Status)
+	if report.Status == statusDegraded || report.Status == statusUnhealthy {
+		t.Fatalf("status = %q, want lenient during the startup grace", report.Status)
 	}
 }
 

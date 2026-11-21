@@ -449,9 +449,15 @@ func (p *klinePartition) closeEvidence() partitionCloseEvidence {
 // shutdown/renewal is never a venue fault) and falls back to the transport classification.
 func (p *klinePartition) recordClose(ws *binancews.Connection) {
 	evidence := ws.CloseEvidence()
-	cause := evidence.Initiator
-	if cause == "" {
-		cause = classifyDisconnect(ws.TerminalError())
+	// The transport classification is the fact; the initiator is the fallback. Preferring the
+	// initiator labelled every 1006 as "remote", erasing the distinction between a venue close,
+	// an RST and a frame-less drop that /health exists to expose.
+	cause := ""
+	if term := ws.TerminalError(); term != nil {
+		cause = classifyDisconnect(term)
+	}
+	if cause == "" || cause == "none" {
+		cause = evidence.Initiator
 	}
 	p.lastCloseMu.Lock()
 	p.lastCloseCode = evidence.Code
