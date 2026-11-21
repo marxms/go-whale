@@ -211,6 +211,8 @@ type MarkedGap struct {
 // lossy: the venue never resends a finished bucket. Symbols must be the exact strings the feed
 // publishes under; this engine normalizes nothing.
 func (ce *CandleEngine) MarkOpenBucketGapped(exchange, marketType, tf string, symbols []string) []MarkedGap {
+	now := time.Now().UnixMilli()
+	tfMs, _ := candle.ParseTimeframeMs(tf)
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
 
@@ -226,10 +228,17 @@ func (ce *CandleEngine) MarkOpenBucketGapped(exchange, marketType, tf string, sy
 				return
 			}
 			latest.HasGap = true
-			// The venue's kline frame carries the prices; what a restart hole costs is the
-			// running volume total. Recording that kind is what lets the fold rebuild a
-			// derived parent from this bucket instead of freezing it.
-			latest.GapKind = candle.GapVolumeIncomplete
+			// A bucket whose close is still ahead will be completed by the next live frame:
+			// only the volume accumulated during the hole is lost, so the prices stay exact
+			// and the fold may rebuild a parent from it. A bucket that already CLOSED during
+			// the interruption is permanently lossy — the venue never resends it — and its
+			// OHLC are frozen at the last frame, so calling it volume-only would publish a
+			// partial price as exact.
+			if tfMs > 0 && latest.Timestamp+tfMs > now {
+				latest.GapKind = candle.GapVolumeIncomplete
+			} else {
+				latest.GapKind = candle.GapProvisional
+			}
 			ts = latest.Timestamp
 		})
 		if ts != 0 {
@@ -593,7 +602,7 @@ func (ce *CandleEngine) seedCandles(exchange, marketType, symbol, tf string, see
 			seenGaps := make(map[int64]struct{})
 			for _, c := range merged {
 				old, exists := before[c.Timestamp]
-				if ce.derivedScopes[exchange+":"+marketType] != "" && (!exists || !candle.SameFoldValues(old, c) || old.HasGap != c.HasGap) {
+				if ce.derivedScopes[exchange+":"+marketType] != "" && (!exists || !candle.SameFoldValues(old, c) || old.HasGap != c.HasGap || old.GapKind != c.GapKind) {
 					affected = append(affected, c.Timestamp)
 				}
 				in := incoming[c.Timestamp]

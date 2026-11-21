@@ -38,6 +38,47 @@ func (ce *CandleEngine) FoldUp(exchange, marketType, symbol, childTF string, chi
 func (ce *CandleEngine) RepairAncestors(exchange, marketType, childTF string, marks []MarkedGap) {
 	for _, m := range marks {
 		ce.FoldUp(exchange, marketType, m.Symbol, childTF, m.Timestamp)
+		// FoldUp stops at the first level whose children are incomplete. A provisional child is
+		// not foldable, but every ancestor that CONTAINS it is still unproven: mark the existing
+		// ones so a coarser level cannot publish them as clean.
+		ce.markAncestorsIncomplete(exchange, marketType, m.Symbol, childTF, m.Timestamp)
+	}
+}
+
+// markAncestorsIncomplete marks every EXISTING ancestor that contains the given marked bucket as
+// provisional, without rebuilding its values. Rebuilding from a provisional child is forbidden;
+// leaving the ancestor unmarked is what made a coarser timeframe fold it as clean.
+func (ce *CandleEngine) markAncestorsIncomplete(exchange, marketType, symbol, childTF string, childTS int64) {
+	now := time.Now().UnixMilli()
+	for _, step := range candle.FoldChain() {
+		if step.Child != childTF {
+			continue
+		}
+		parentTS := candle.BucketTimestamp(childTS, step.TF)
+		key := CompositeKey{exchange, marketType, symbol, step.TF}
+		var callback func()
+		ce.mu.Lock()
+		if buf, ok := ce.buffers[key]; ok {
+			for i := 0; i < buf.Len(); i++ {
+				old, _ := buf.At(i)
+				if old.Timestamp != parentTS {
+					continue
+				}
+				hasGap, gapKind := candle.MergeGapMark(old, candle.Candle{HasGap: true, GapKind: candle.GapProvisional})
+				if hasGap == old.HasGap && gapKind == old.GapKind {
+					break
+				}
+				old.HasGap, old.GapKind = hasGap, gapKind
+				buf.SetAt(i, old)
+				callback = ce.notifyGapChange(key, old, step, parentTS, now, false)
+				break
+			}
+		}
+		ce.mu.Unlock()
+		if callback != nil {
+			callback()
+		}
+		childTF, childTS = step.TF, parentTS
 	}
 }
 
@@ -123,7 +164,7 @@ func (ce *CandleEngine) rebuildFromChildren(exchange, marketType, symbol string,
 			if hasGap == old.HasGap && gapKind == old.GapKind {
 				return true
 			}
-			gapChanged := old.HasGap != hasGap
+			gapChanged := old.HasGap != hasGap || old.GapKind != gapKind
 			old.HasGap, old.GapKind = hasGap, gapKind
 			buf.SetAt(i, old)
 			if gapChanged {
@@ -135,7 +176,7 @@ func (ce *CandleEngine) rebuildFromChildren(exchange, marketType, symbol string,
 			// Complete measured children establish derived provenance even when
 			// the financial payload is unchanged. A completeness change is
 			// observable; source/origin alone do not emit a revision.
-			gapChanged := old.HasGap != parent.HasGap
+			gapChanged := old.HasGap != parent.HasGap || old.GapKind != parent.GapKind
 			old.Source, old.Origin, old.HasGap, old.GapKind = parent.Source, parent.Origin, parent.HasGap, parent.GapKind
 			buf.SetAt(i, old)
 			if gapChanged {

@@ -58,8 +58,10 @@ func TestRepairAncestorsMarksANativeParentWithoutOverwritingItsValues(t *testing
 	if !after.HasGap {
 		t.Fatal("the native parent kept HasGap=false after a child was marked incomplete")
 	}
-	if after.GapKind != candle.GapVolumeIncomplete {
-		t.Fatalf("GapKind = %v, want GapVolumeIncomplete — the cause must travel with the mark",
+	// The child closed during the hole, so its mark is provisional; the parent inherits the
+	// WEAKER promise, never the optimistic one it was marked with before.
+	if after.GapKind != candle.GapProvisional {
+		t.Fatalf("GapKind = %v, want GapProvisional — the cause must travel with the mark",
 			after.GapKind)
 	}
 	if after.Volume != 99 || after.High != 2 || after.Low != 0.5 {
