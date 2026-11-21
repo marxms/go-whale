@@ -32,12 +32,6 @@ type Metrics struct {
 	ColdDurableFalse func(exchange, marketType string)
 }
 
-func (m Metrics) setColdPendingDepth(exchange, marketType string, v float64) {
-	if m.ColdPendingDepth != nil {
-		m.ColdPendingDepth(exchange, marketType, v)
-	}
-}
-
 func (m Metrics) incColdDurableFalse(exchange, marketType string) {
 	if m.ColdDurableFalse != nil {
 		m.ColdDurableFalse(exchange, marketType)

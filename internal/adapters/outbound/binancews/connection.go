@@ -255,7 +255,8 @@ func (c *Connection) Connect(ctx context.Context, handlers map[string]Handler) e
 	nowMs := time.Now().UnixMilli()
 	c.lastMessageAt.Store(nowMs)
 	c.dialedAtMs.Store(nowMs)
-	c.streams.Store(int32(streamCount))
+	// The stream count is bounded by maxStreamsPerConnection (URL budget), far below MaxInt32.
+	c.streams.Store(int32(streamCount)) //nolint:gosec // G115: bounded by maxStreamsPerConnection.
 	c.connMu.Unlock()
 
 	c.wg.Add(1)

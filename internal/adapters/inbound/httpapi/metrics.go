@@ -209,14 +209,6 @@ func (mc *MetricsCollector) SetFeedProducers(reports []health.FeedProducerReport
 	mc.feedProducers.Store(append([]health.FeedProducerReport(nil), reports...))
 }
 
-// SetExpectedScopes declares the exchange:market_type scopes that MUST have a
-// healthy connected stream once the startup grace period has elapsed. Scopes
-// are canonicalized via market.FromConfig so callers may pass raw config market
-// types ("swap", "future", "spot") interchangeably; "binance:future" and
-// "bingx:swap" both normalize into the "<id>:future" namespace. After the grace
-// window, any expected scope without a healthy connected stream makes /health
-// report "unhealthy"/503, so a totally dead exchange does not pass the probe.
-// Passing an empty slice disables the expected-scope check (lenient mode).
 // SetPartitions publishes the live feed partitions. Observational: the verdict over a
 // silent fraction belongs to fleet liveness, so this setter never decides the HTTP status.
 func (mc *MetricsCollector) SetPartitions(probe func() ([]health.PartitionHealth, bool)) {
@@ -235,6 +227,14 @@ func (mc *MetricsCollector) SetFeedReconnectExhausted(probe func() (bool, bool))
 	mc.feedReconnectExhausted.Store(probe)
 }
 
+// SetExpectedScopes declares the exchange:market_type scopes that MUST have a
+// healthy connected stream once the startup grace period has elapsed. Scopes
+// are canonicalized via market.FromConfig so callers may pass raw config market
+// types ("swap", "future", "spot") interchangeably; "binance:future" and
+// "bingx:swap" both normalize into the "<id>:future" namespace. After the grace
+// window, any expected scope without a healthy connected stream makes /health
+// report "unhealthy"/503, so a totally dead exchange does not pass the probe.
+// Passing an empty slice disables the expected-scope check (lenient mode).
 func (mc *MetricsCollector) SetExpectedScopes(scopes []string) {
 	canon := make([]string, 0, len(scopes))
 	for _, s := range scopes {

@@ -48,6 +48,7 @@ const (
 	labelFeed       = "feed"
 	labelMarket     = "market"
 	labelCapability = "capability"
+	labelChannel    = "channel"
 )
 
 // Provider holds every registered collector and exposes the owning-package ports.
@@ -288,15 +289,15 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 	realtimeDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "realtime_publish_dropped_total",
 		Help: "Realtime events discarded because the outbound queue was full, by channel. >0 means the bus could not keep up and subscribers will detect a sequence gap and rehydrate.",
-	}, []string{"channel"})
+	}, []string{labelChannel})
 	realtimeQueueDepth := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "realtime_queue_depth",
 		Help: "Events waiting in the outbound queue, by channel. A rising depth is the bus falling behind; it is not a drop yet.",
-	}, []string{"channel"})
+	}, []string{labelChannel})
 	realtimeOldestPendingAge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "realtime_oldest_pending_age_seconds",
 		Help: "Age of the oldest event still pending in the outbound queue, by channel. It updates on traffic and is an upper bound when the head was just consumed.",
-	}, []string{"channel"})
+	}, []string{labelChannel})
 	p.realtime = realtime.Metrics{
 		PublishDropped:    func(channel string) { realtimeDropped.WithLabelValues(channel).Inc() },
 		PublishQueueDepth: func(channel string, depth int) { realtimeQueueDepth.WithLabelValues(channel).Set(float64(depth)) },

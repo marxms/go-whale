@@ -48,7 +48,9 @@ type workflow struct {
 
 // workflows is the complete set this repository ships. Absence is refusal, never
 // "nothing to check": a deleted workflow is the most complete disarmament there is.
-var workflows = []string{"ci.yml", "integration.yml", "schema.yml", "security.yml"}
+func shippedWorkflows() []string {
+	return []string{"ci.yml", "integration.yml", "schema.yml", "security.yml"}
+}
 
 func load(t *testing.T, name string) workflow {
 	t.Helper()
@@ -109,7 +111,7 @@ func anyContains(values []string, want string) bool {
 // TestCiContractPackageRuns proves the package is wired: every workflow parses, declares at
 // least one job, one step, and one step that executes or uses something.
 func TestCiContractPackageRuns(t *testing.T) {
-	for _, name := range workflows {
+	for _, name := range shippedWorkflows() {
 		t.Run(name, func(t *testing.T) {
 			parsed := load(t, name)
 			if len(parsed.Jobs) == 0 {
@@ -214,7 +216,7 @@ func TestSecurityWorkflowScansSecretsAndVulnerabilities(t *testing.T) {
 // TestGateStepsDoNotSwallowFailure asserts that no step declares tolerance. A
 // `continue-on-error` in a gate is a refusal to gate, whatever its expression evaluates to.
 func TestGateStepsDoNotSwallowFailure(t *testing.T) {
-	for _, name := range workflows {
+	for _, name := range shippedWorkflows() {
 		for _, s := range load(t, name).allSteps() {
 			if s.ContinueOnError != nil {
 				t.Fatalf("%s step %q declares continue-on-error", name, s.Name)

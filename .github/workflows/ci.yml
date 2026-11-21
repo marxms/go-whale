@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify:
-    name: verify (Go 1.26.10)
+    name: verify (Go 1.26.11)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -21,7 +21,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: "1.26.10"
+          go-version: "1.26.11"
           cache-dependency-path: go.sum
 
       - name: Toolchain and pinned tools
