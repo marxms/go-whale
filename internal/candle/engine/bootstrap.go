@@ -51,7 +51,7 @@ func firstNonNilErr(errs ...error) error {
 // WarmCandleEngine seeds CandleEngine buffers from QuestDB (primary) or Redis (fallback) on startup.
 // ctx is the process lifetime context; the warm-up applies its own 60s ceiling on top of it.
 func WarmCandleEngine(ctx context.Context, eng *CandleEngine, coldStore candle.ColdStore, redis *redisstore.RedisStore, cfg config.Config) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, cfg.CandleEngine.WarmSeedBudget())
 	defer cancel()
 
 	symbols, err := redis.GetAllActiveSymbols(ctx)

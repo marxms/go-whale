@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -163,6 +164,9 @@ func loadYAML(filename string) (Config, error) {
 
 	// BingxMinIntervalMS is sourced only from the candle_engine section.
 	cfg.BingxMinIntervalMS = yamlCfg.CandleEngine.BingxMinIntervalMS
+	if envBudget := os.Getenv("GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS"); envBudget != "" {
+		cfg.CandleEngine.WarmSeedBudgetSeconds = getEnvInt("GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS", cfg.CandleEngine.WarmSeedBudgetSeconds)
+	}
 
 	// Override with environment variables if present
 	if envPort := os.Getenv("GOWHALE_SERVER_PORT"); envPort != "" {
@@ -416,6 +420,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.CandleEngine.BingxMinIntervalMS == 0 {
 		cfg.CandleEngine.BingxMinIntervalMS = 300
 	}
+	if cfg.CandleEngine.WarmSeedBudgetSeconds == 0 {
+		cfg.CandleEngine.WarmSeedBudgetSeconds = int(defaultWarmSeedBudget / time.Second)
+	}
 
 	// Derivatives bootstrap depth is a CONSEQUENCE of retention, not a parallel choice:
 	// fetching deeper than the deepest retained series spends REST, CPU and boot time on
@@ -491,6 +498,9 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("candle_engine.timeframes: %w", err)
 		}
 	}
+	if err := validateWarmSeedBudget(cfg.CandleEngine.WarmSeedBudgetSeconds); err != nil {
+		return err
+	}
 
 	seen := make(map[string]bool)
 	for _, ex := range cfg.Exchanges {
@@ -523,6 +533,15 @@ func Validate(cfg Config) error {
 		log.Printf("WARN: high trade buffer memory usage estimated: %d slots (~%d MB) (trade_buffer_size=%d * max_symbols=%d)", tradeBufferUsage, memMB, cfg.TradeBufferSize, cfg.MaxSymbolsPerInstance)
 	}
 
+	return nil
+}
+
+// validateWarmSeedBudget rejects a boot ceiling that is too short to seed the fleet or so
+// long it delays first health past the deploy deadline. Zero is undeclared and allowed.
+func validateWarmSeedBudget(seconds int) error {
+	if seconds != 0 && (seconds < 30 || seconds > 600) {
+		return fmt.Errorf("candle_engine.warm_seed_budget_seconds must be within 30..600, got %d", seconds)
+	}
 	return nil
 }
 
