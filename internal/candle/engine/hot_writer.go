@@ -35,8 +35,8 @@ type hotBucketKey struct {
 	timestamp int64
 }
 
-// HotFlush is the owner's write. It runs on the HotWriter goroutine, never on the reader.
-type HotFlush func(ctx context.Context, entries []hotWrite) error
+// hotFlush is the owner's write. It runs on the HotWriter goroutine, never on the reader.
+type hotFlush func(ctx context.Context, entries []hotWrite) error
 
 // HotWriterStats is what the health/metrics read. Depth counts pending plus in-flight entries.
 type HotWriterStats struct {
@@ -61,7 +61,7 @@ type HotWriterStats struct {
 // Replacing the pending entry is therefore lossless for the hot tier; only a NEW key arriving when
 // the queue is full is dropped, and that drop is counted.
 type HotWriter struct {
-	flush    HotFlush
+	flush    hotFlush
 	capacity int
 	interval time.Duration
 
@@ -121,7 +121,7 @@ func WithHotWriterMetrics(m Metrics) HotWriterOption {
 
 // NewHotWriter builds the writer. The owner starts on the first admission, so an App that never
 // closes a bucket carries no idle goroutine; the caller must Stop it.
-func NewHotWriter(flush HotFlush, opts ...HotWriterOption) *HotWriter {
+func newHotWriter(flush hotFlush, opts ...HotWriterOption) *HotWriter {
 	w := &HotWriter{
 		flush:    flush,
 		capacity: defaultHotWriterCapacity,
@@ -344,7 +344,7 @@ func (w *HotWriter) requeue(batch []hotWrite) {
 // guard keeps a disabled hot tier a no-op instead of an error on every close.
 func (ts *TieredStore) NewHotWriter(opts ...HotWriterOption) *HotWriter {
 	opts = append(opts, WithHotWriterMetrics(ts.metrics))
-	return NewHotWriter(func(parent context.Context, entries []hotWrite) error {
+	return newHotWriter(func(parent context.Context, entries []hotWrite) error {
 		if !ts.writeThrough || ts.redis == nil || len(entries) == 0 {
 			return nil
 		}

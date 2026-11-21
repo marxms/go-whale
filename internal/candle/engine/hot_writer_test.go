@@ -22,7 +22,7 @@ func TestHotWriterCoalescesLatestPerKey(t *testing.T) {
 	flushed := make(chan []hotWrite, 4)
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
-	writer := NewHotWriter(
+	writer := newHotWriter(
 		func(ctx context.Context, entries []hotWrite) error {
 			flushed <- entries
 			started <- struct{}{}
@@ -91,7 +91,7 @@ func TestHotWriterRecordsDropAndOldestPending(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	log, sink := logger.NewCapture(logger.LevelWarn)
-	writer := NewHotWriter(
+	writer := newHotWriter(
 		func(_ context.Context, _ []hotWrite) error {
 			started <- struct{}{}
 			<-release
@@ -146,7 +146,7 @@ func TestHotWriterRecordsDropAndOldestPending(t *testing.T) {
 // last-frame clock advance, because Enqueue never waits for the flush.
 func TestRedisStallDoesNotChangeFramesOrLastFrameAge(t *testing.T) {
 	release := make(chan struct{})
-	writer := NewHotWriter(
+	writer := newHotWriter(
 		func(ctx context.Context, _ []hotWrite) error {
 			select {
 			case <-release:
@@ -184,7 +184,7 @@ func TestRedisStallDoesNotChangeFramesOrLastFrameAge(t *testing.T) {
 // frame stays recent. The hot tier is best-effort; Redis latency is not a partition property.
 func TestRedisStallKeepsLivenessIndependent(t *testing.T) {
 	release := make(chan struct{})
-	writer := NewHotWriter(
+	writer := newHotWriter(
 		func(ctx context.Context, _ []hotWrite) error {
 			select {
 			case <-release:

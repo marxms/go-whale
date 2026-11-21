@@ -22,7 +22,7 @@ func TestHotWriterKeepsDistinctClosedBuckets(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	first := true
-	writer := NewHotWriter(
+	writer := newHotWriter(
 		func(_ context.Context, entries []hotWrite) error {
 			if first {
 				first = false
@@ -92,7 +92,7 @@ func TestHotWriterRequeuesFailedBatchKeepingNewerSnapshot(t *testing.T) {
 	fail := true
 	attempted := make(chan struct{}, 8)
 	var failed int
-	writer := NewHotWriter(
+	writer := newHotWriter(
 		func(_ context.Context, entries []hotWrite) error {
 			mu.Lock()
 			defer mu.Unlock()
@@ -157,7 +157,7 @@ func TestHotWriterExportsCountersAndDepth(t *testing.T) {
 	oldest := -1.0
 	started := make(chan struct{})
 	release := make(chan struct{})
-	writer := NewHotWriter(
+	writer := newHotWriter(
 		func(context.Context, []hotWrite) error {
 			select {
 			case started <- struct{}{}:

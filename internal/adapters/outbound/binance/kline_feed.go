@@ -149,7 +149,6 @@ type klinePartition struct {
 	lastCloseMu          sync.Mutex
 	lastCloseCode        int
 	lastCloseCause       string
-	lastCloseAtMs        int64
 	lastCloseDialAgeMs   int64
 	lastCloseStreams     int
 	lastCloseSisterAgeMs int64
@@ -462,7 +461,6 @@ func (p *klinePartition) recordClose(ws *binancews.Connection) {
 	p.lastCloseMu.Lock()
 	p.lastCloseCode = evidence.Code
 	p.lastCloseCause = cause
-	p.lastCloseAtMs = time.Now().UnixMilli()
 	p.lastCloseDialAgeMs = evidence.DialAge.Milliseconds()
 	p.lastCloseStreams = evidence.Streams
 	p.lastCloseSisterAgeMs = evidence.SisterLastFrameAge.Milliseconds()
