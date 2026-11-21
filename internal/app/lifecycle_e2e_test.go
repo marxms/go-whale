@@ -1194,9 +1194,21 @@ func TestLifecycle_PublisherFailureDegradesWithoutDisablingGuards(t *testing.T) 
 	if got, ok := app.continuityTracker().LatestClosed(key); !ok || got != base+63*5*60*1000 {
 		t.Fatalf("publisher failure stopped the continuity baseline: %d (present=%t)", got, ok)
 	}
-	hot, err := app.redisStore.GetCandlesAsc(context.Background(), key.Exchange, key.MarketType, key.Symbol, "5m", 64)
-	if err != nil || len(hot) == 0 {
-		t.Fatalf("publisher failure disabled the hot-tier close write: %v", err)
+	// The hot write is a 50 ms write-behind: poll for it instead of assuming the flush already
+	// ran. The assertion is unchanged — a publisher failure must not disable the hot path — but
+	// it no longer depends on scheduler order (it flaked under the full suite).
+	var hot []candle.Candle
+	var err error
+	hotDeadline := time.Now().Add(2 * time.Second)
+	for {
+		hot, err = app.redisStore.GetCandlesAsc(context.Background(), key.Exchange, key.MarketType, key.Symbol, "5m", 64)
+		if err == nil && len(hot) > 0 {
+			break
+		}
+		if time.Now().After(hotDeadline) {
+			t.Fatalf("publisher failure disabled the hot-tier close write: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	// Expected scopes, coverage and liveness are configured independently of the transport.
