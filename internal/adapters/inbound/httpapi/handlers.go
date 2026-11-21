@@ -20,6 +20,7 @@ import (
 const (
 	responseKeyStatus = "status"
 	responseKeyError  = "error"
+	responseKeyCode   = "code"
 )
 
 // errMsgSymbolRequired is the bad-request message for a missing symbol on every
@@ -130,7 +131,7 @@ func (h *Handler) getTimeseriesWithParams(w http.ResponseWriter, r *http.Request
 		// end — the requirement asks for the code "in the analyzer and in the streamer".
 		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{
 			responseKeyError: "unsupported timeframe",
-			"code":           "invalid_timeframe",
+			responseKeyCode:  "invalid_timeframe",
 		})
 		return
 	}
@@ -358,7 +359,7 @@ func (h *Handler) GetBatchTimeseries(w http.ResponseWriter, r *http.Request) {
 	if h.tfReg != nil && !h.tfReg.IsSupported(timeframe) {
 		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{
 			responseKeyError: "unsupported timeframe",
-			"code":           "invalid_timeframe",
+			responseKeyCode:  "invalid_timeframe",
 		})
 		return
 	}
@@ -390,7 +391,7 @@ func (h *Handler) GetBatchTimeseries(w http.ResponseWriter, r *http.Request) {
 	if len(symbols)*limit > batchTimeseriesMaxCandles {
 		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{
 			responseKeyError: "batch too large",
-			"code":           "batch_too_large",
+			responseKeyCode:  "batch_too_large",
 		})
 		return
 	}

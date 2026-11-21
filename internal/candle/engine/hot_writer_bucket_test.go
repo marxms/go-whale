@@ -10,8 +10,8 @@ import (
 	"github.com/marxms/go-whale/internal/candle"
 )
 
-func hotCandleAt(ts int64, close float64) candle.Candle {
-	return candle.Candle{Timestamp: ts, LastUpdate: ts, Close: close, Open: close, High: close, Low: close, Volume: 1}
+func hotCandleAt(ts int64, closePrice float64) candle.Candle {
+	return candle.Candle{Timestamp: ts, LastUpdate: ts, Close: closePrice, Open: closePrice, High: closePrice, Low: closePrice, Volume: 1}
 }
 
 // Five distinct closed buckets of ONE series must all reach the hot tier. Keying by the series
