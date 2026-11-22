@@ -15,6 +15,7 @@ import (
 
 	"github.com/marxms/go-whale/internal/adapters/inbound/realtime"
 	binancesdk "github.com/marxms/go-whale/internal/adapters/outbound/binance"
+	"github.com/marxms/go-whale/internal/adapters/outbound/bingx"
 	"github.com/marxms/go-whale/internal/adapters/outbound/questdb"
 	redisstore "github.com/marxms/go-whale/internal/adapters/outbound/redis"
 	"github.com/marxms/go-whale/internal/adapters/outbound/venue"
@@ -55,6 +56,7 @@ const (
 type Provider struct {
 	streaming   streaming.Metrics
 	binance     binancesdk.Metrics
+	bingx       bingx.Metrics
 	realtime    realtime.Metrics
 	venue       venue.Metrics
 	questdb     questdb.Metrics
@@ -195,9 +197,9 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Help: "Trades LOST by exchange and market type (parse failure, callback panic, or an append refused by a full buffer). Excludes trades that were stored.",
 	}, []string{labelExchange, labelMarketType})
 	tradesDroppedClassified := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
 		Name: "trades_dropped_classified_total",
-		Help: "Trades LOST locally with the reason, symbol and real connection partition. Its delta sums to trades_dropped_total; a drop without a location is unmeasured.",
+		Help: "Trades LOST locally with the reason, symbol and real connection partition, for every venue. Its delta sums to the venue's legacy aggregate; a drop without a location is unmeasured.",
 	}, []string{labelExchange, labelMarketType, labelSymbol, "partition", labelReason})
 	tradesIngested := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
@@ -290,6 +292,12 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 			messagesIn.WithLabelValues(ex, mt)
 			tradesIngested.WithLabelValues(ex, mt)
 			tradesDropped.WithLabelValues(ex, mt)
+		},
+	}
+
+	p.bingx = bingx.Metrics{
+		TradesDroppedClassified: func(ex, mt, symbol string, partition int, reason string) {
+			tradesDroppedClassified.WithLabelValues(ex, mt, symbol, strconv.Itoa(partition), reason).Inc()
 		},
 	}
 
@@ -851,6 +859,9 @@ func (p *Provider) Streaming() streaming.Metrics { return p.streaming }
 
 // Binance returns the Binance adapter metrics port.
 func (p *Provider) Binance() binancesdk.Metrics { return p.binance }
+
+// BingX returns the BingX adapter drop-observability port.
+func (p *Provider) BingX() bingx.Metrics { return p.bingx }
 
 // Realtime returns the realtime edge metrics port.
 func (p *Provider) Realtime() realtime.Metrics { return p.realtime }

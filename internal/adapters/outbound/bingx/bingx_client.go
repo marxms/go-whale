@@ -132,6 +132,12 @@ type BingXClient struct {
 	// netdiag correlates a disconnect with drops on other venues; the composition root
 	// injects the process-wide instance.
 	netdiag *netdiag.Correlator
+
+	// metrics is the drop-observability port; partition is the pool connection
+	// index, assigned BEFORE Connect. A cleanup therefore never derives the
+	// partition from map order or from a late symbolMap lookup.
+	metrics   Metrics
+	partition int
 }
 
 // NewBingXClient creates new BingX streaming client.
@@ -178,6 +184,13 @@ func NewBingXClient(config ClientConfig, logs ...*slog.Logger) *BingXClient {
 
 // SetNetdiag injects the cross-venue disconnect correlator.
 func (c *BingXClient) SetNetdiag(correlator *netdiag.Correlator) { c.netdiag = correlator }
+
+// SetMetrics injects the drop-observability port.
+func (c *BingXClient) SetMetrics(metrics Metrics) { c.metrics = metrics }
+
+// SetPartition records the real pool connection index. The pool calls it
+// before Connect so a failed or later cleanup still names the right partition.
+func (c *BingXClient) SetPartition(partition int) { c.partition = partition }
 
 // closed reports whether Close canceled the client lifecycle. A zero-value fixture
 // built in a test without the constructor has a nil ctx; treat that as open rather than
@@ -881,6 +894,13 @@ func (c *BingXClient) cleanupOnError(err error) {
 	for symbol, buffer := range c.tradeBuffers {
 		if len(buffer) > 0 {
 			totalBufferedTrades += len(buffer)
+			// Every discarded item is ONE local drop. Counting the buffer once
+			// would make N losses look like one; counting after the reset below
+			// would hide them entirely. Iteration order is irrelevant: each item
+			// carries its own symbol and the client's pre-assigned partition.
+			for range buffer {
+				c.recordDrop(trade.DropCleanupDiscard, symbol)
+			}
 			logger.OrDiscard(c.log).Warn("bingx: discarding buffered trades due to disconnect",
 				"trades", len(buffer), "symbol", symbol)
 		}
@@ -911,6 +931,22 @@ func (c *BingXClient) cleanupOnError(err error) {
 		logger.OrDiscard(c.log).Warn("bingx: cleanup complete",
 			"cleared_buffers", bufferCount, "preserved_subscriptions", subscriptionCount)
 	}
+}
+
+// recordDrop spends one local cleanup loss on the legacy counter and on the
+// classified series carrying reason, symbol, market and the real partition.
+// It never advances a provider-missing count: a cleanup discard is a LOCAL
+// loss and must not be reported as a gap the exchange caused.
+func (c *BingXClient) recordDrop(reason trade.DropReason, symbol string) uint64 {
+	total := c.tradesDropped.Add(1)
+	// The config uses the venue vocabulary ("swap"); the metric carries the
+	// canonical "future" so BingX and Binance share one label.
+	marketType := market.MarketType(c.config.MarketType)
+	if canonical, err := market.ParseMarketType(c.config.MarketType); err == nil {
+		marketType = canonical
+	}
+	c.metrics.incTradesDroppedClassified(c.config.ExchangeID, marketType.String(), symbol, c.partition, string(reason))
+	return total
 }
 
 // handleDisconnect handles connection loss and triggers reconnection. It is the single entry

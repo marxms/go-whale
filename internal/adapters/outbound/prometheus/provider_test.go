@@ -139,7 +139,7 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 		"gowhale_binancesdk_last_message_age_seconds", "gowhale_binancesdk_partition_stale_fraction",
 		"gowhale_binancesdk_health_state", "gowhale_binancesdk_messages_in_total",
 		"gowhale_binancesdk_trades_dropped_total", "gowhale_binancesdk_trades_ingested_total",
-		"gowhale_binancesdk_trades_dropped_classified_total",
+		"gowhale_stream_trades_dropped_classified_total",
 		"gowhale_binancesdk_reconnect_signals_dropped_total", "gowhale_binancesdk_resubscribe_incomplete_total",
 		"gowhale_binancesdk_resubscribe_unverified_total", "gowhale_binancesdk_dynamic_subscribe_deferred_total",
 		"gowhale_binancesdk_starvation_suppressed_reconnect_total",

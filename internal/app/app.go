@@ -14,6 +14,7 @@ import (
 	binancesdk "github.com/marxms/go-whale/internal/adapters/outbound/binance"
 	"github.com/marxms/go-whale/internal/adapters/outbound/binancerest"
 	"github.com/marxms/go-whale/internal/adapters/outbound/binancews"
+	"github.com/marxms/go-whale/internal/adapters/outbound/bingx"
 	"github.com/marxms/go-whale/internal/adapters/outbound/exchange"
 	"github.com/marxms/go-whale/internal/adapters/outbound/questdb"
 	redisstore "github.com/marxms/go-whale/internal/adapters/outbound/redis"
@@ -126,6 +127,7 @@ type App struct {
 	metrics            AppMetrics
 	streamMetrics      streaming.Metrics
 	binanceMetrics     binancesdk.Metrics
+	bingxMetrics       bingx.Metrics
 	ingestionMetrics   ingestion.Metrics
 	engineMetrics      engine.Metrics
 	collectorMetrics   collector.Metrics

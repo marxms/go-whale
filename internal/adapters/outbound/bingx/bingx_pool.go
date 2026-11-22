@@ -32,6 +32,7 @@ type BingXConnectionPool struct {
 	symbolMap   map[string]int // symbol -> connection index
 	mu          sync.RWMutex
 	netdiag     *netdiag.Correlator
+	metrics     Metrics
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -61,6 +62,17 @@ func (p *BingXConnectionPool) SetNetdiag(correlator *netdiag.Correlator) {
 	p.netdiag = correlator
 	for _, client := range p.connections {
 		client.SetNetdiag(correlator)
+	}
+}
+
+// SetMetrics injects the drop port into the pool and every existing client.
+// New clients receive it before Connect, alongside their partition.
+func (p *BingXConnectionPool) SetMetrics(metrics Metrics) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.metrics = metrics
+	for _, client := range p.connections {
+		client.SetMetrics(metrics)
 	}
 }
 
@@ -98,8 +110,14 @@ func (p *BingXConnectionPool) Subscribe(ctx context.Context, symbol string) erro
 		logger.OrDiscard(p.log).Info("bingx pool: creating connection",
 			"connections", len(p.connections), "total_symbols", len(p.symbolMap)+1)
 
+		// The partition is the connection's REAL identity. Assign it BEFORE
+		// Connect: a failed or later cleanup must never report a partition
+		// derived from map order or from a symbolMap lookup after a rebalance.
+		connIndex = len(p.connections)
 		client := NewBingXClient(p.config, p.log)
 		client.SetNetdiag(p.netdiag)
+		client.SetMetrics(p.metrics)
+		client.SetPartition(connIndex)
 		if err := client.Connect(ctx); err != nil {
 			return fmt.Errorf("failed to connect a new connection: %w", err)
 		}

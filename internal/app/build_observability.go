@@ -30,6 +30,7 @@ func (a *App) buildObservability() (*prommetrics.Provider, error) {
 	}
 	a.streamMetrics = provider.Streaming()
 	a.binanceMetrics = provider.Binance()
+	a.bingxMetrics = provider.BingX()
 	a.ingestionMetrics = provider.Ingestion()
 	a.engineMetrics = provider.Engine()
 	a.collectorMetrics = provider.Collector()

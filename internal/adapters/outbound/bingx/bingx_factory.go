@@ -20,6 +20,7 @@ type ClientFactory struct {
 	mu      sync.Mutex
 	pools   map[string]*BingXConnectionPool
 	netdiag *netdiag.Correlator
+	metrics Metrics
 	log     *slog.Logger
 }
 
@@ -29,6 +30,19 @@ func (f *ClientFactory) SetNetdiag(correlator *netdiag.Correlator) {
 	f.mu.Lock()
 	f.netdiag = correlator
 	f.mu.Unlock()
+}
+
+// SetMetrics injects the drop port into every pool this factory owns and into
+// pools created later. The composition root calls it once before ingestion.
+func (f *ClientFactory) SetMetrics(metrics Metrics) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.metrics = metrics
+	for _, pool := range f.pools {
+		if pool != nil {
+			pool.SetMetrics(metrics)
+		}
+	}
 }
 
 // NewClientFactory returns an empty catalog. It performs no I/O and starts no goroutine.
@@ -56,6 +70,7 @@ func (f *ClientFactory) For(config ClientConfig) (StreamingClient, error) {
 
 	pool := newBingXPool(config, f.log)
 	pool.SetNetdiag(f.netdiag)
+	pool.SetMetrics(f.metrics)
 	f.pools[key] = pool
 	logger.OrDiscard(f.log).Info("bingx connection pool created",
 		"key", key,
