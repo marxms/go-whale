@@ -296,7 +296,7 @@ func (c *SpotSDKClient) connectAndResubscribeCombined(symbols []string) (int, er
 		off += len(part)
 		handlers := make(map[string]binancews.Handler, len(part))
 		for _, symbol := range part {
-			handlers[streamName(symbol)] = c.tradeCallback(symbol)
+			handlers[streamName(symbol)] = c.tradeCallback(symbol, i)
 		}
 		if err := connectMarketStream(c.ctx, c.ctx, conn, handlers); err != nil {
 			for _, prev := range clients {
@@ -347,7 +347,7 @@ func (c *SpotSDKClient) Subscribe(ctx context.Context, symbol string) error {
 	if conn == nil {
 		return fmt.Errorf("spot websocket not initialized")
 	}
-	if err := conn.Subscribe(ctx, streamName(symbol), c.tradeCallback(symbol)); err != nil {
+	if err := conn.Subscribe(ctx, streamName(symbol), c.tradeCallback(symbol, conn.ID)); err != nil {
 		return fmt.Errorf("failed to subscribe to %s spot aggTrade: %w", symbol, err)
 	}
 
@@ -363,21 +363,19 @@ func (c *SpotSDKClient) Subscribe(ctx context.Context, symbol string) error {
 // tradeCallback returns the per-symbol spot message handler. Shared by Subscribe
 // (dynamic add) and the combined-URL resubscribe path so both record metrics,
 // parse, and buffer identically.
-func (c *SpotSDKClient) tradeCallback(symbol string) binancews.Handler {
+func (c *SpotSDKClient) tradeCallback(symbol string, partition int) binancews.Handler {
 	return func(data []byte) {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.OrDiscard(c.log).Error("panic in spot trade callback", "symbol", symbol, "panic", r)
-				c.tradesDropped.Add(1)
-				c.metrics.incTradesDropped(venueBinance, marketTypeSpot)
+				c.recordDrop(trade.DropPanic, symbol, partition)
 			}
 		}()
 
 		var msg tradeEvent
 		if err := json.Unmarshal(data, &msg); err != nil {
 			logger.OrDiscard(c.log).Warn("spot trade callback: malformed frame", "symbol", symbol, "error", err)
-			c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeSpot)
+			c.recordDrop(trade.DropMalformedFrame, symbol, partition)
 			return
 		}
 
@@ -386,19 +384,17 @@ func (c *SpotSDKClient) tradeCallback(symbol string) binancews.Handler {
 
 		c.metrics.incMessagesIn(venueBinance, marketTypeSpot)
 
-		trade := c.toDomainTrade(&msg)
-		if trade == nil {
-			c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeSpot)
+		domainTrade := c.toDomainTrade(&msg)
+		if domainTrade == nil {
+			c.recordDrop(trade.DropNilTrade, symbol, partition)
 			return
 		}
 
 		// Same disjoint-branch contract as the futures callback: ingested means BUFFERED.
 		buf := c.buffers.GetOrCreate(symbol)
-		if buf.Append(*trade) {
+		if buf.Append(*domainTrade) {
 			logger.OrDiscard(c.log).Warn("spot trade buffer overflow; trade dropped", "symbol", symbol, "cap", c.config.TradeBufferSize)
-			c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeSpot)
+			c.recordDrop(trade.DropBufferOverflow, symbol, partition)
 			return
 		}
 		c.tradesIn.Add(1)
@@ -838,6 +834,17 @@ func (c *SpotSDKClient) toDomainTrade(event *tradeEvent) *trade.Trade {
 		Timestamp: event.TradeTime,
 		Side:      side,
 	}
+}
+
+// recordDrop spends one local loss on the legacy spot aggregate AND on the
+// classified series that carries reason, symbol and the real connection
+// partition. The two counters are advanced together, from the same event, so
+// the legacy aggregate is always the sum of the classified deltas.
+func (c *SpotSDKClient) recordDrop(reason trade.DropReason, symbol string, partition int) uint64 {
+	total := c.tradesDropped.Add(1)
+	c.metrics.incTradesDropped(venueBinance, marketTypeSpot)
+	c.metrics.incTradesDroppedClassified(venueBinance, marketTypeSpot, symbol, partition, string(reason))
+	return total
 }
 
 // triggerGapRecovery triggers gap recovery for all symbols after a reconnect.
