@@ -1,0 +1,12 @@
+{
+  "source": "gowhale_stream_trades_buffer_fill delta/intervalo real em 2026-11-22T23:36:45Z/23:40:47Z; 2x por TRD-07",
+  "exchange": "binance",
+  "marketType": "future",
+  "symbol": "BTC/USDT",
+  "partition": 1,
+  "measuredPeakBurstPerSec": 41.97989964375473,
+  "ratePerSec": 83.95979928750945,
+  "multiplier": 2,
+  "burstTrades": 84,
+  "resolvedCap": 5000
+}
