@@ -140,6 +140,12 @@ type BingXClient struct {
 	// partition from map order or from a late symbolMap lookup.
 	metrics   Metrics
 	partition int
+
+	// dropLogMu/dropLogged keep the first log line per (reason, symbol,
+	// partition). The counter keeps every loss; the log keeps one line per
+	// location, so a hot symbol cannot drown a second symbol's first overflow.
+	dropLogMu  sync.Mutex
+	dropLogged map[string]struct{}
 }
 
 // NewBingXClient creates new BingX streaming client.
@@ -834,15 +840,19 @@ func (c *BingXClient) handleTradeMessage(msg map[string]interface{}) {
 
 	// Parse trades and add to buffer
 	for _, item := range data {
-		trade, err := c.parseTrade(symbol, item)
+		parsed, err := c.parseTrade(symbol, item)
 		if err != nil {
-			logger.OrDiscard(c.log).Warn("bingx: trade parse failed", "error", err)
+			if c.firstDropLog(trade.DropMalformedFrame, symbol) {
+				logger.OrDiscard(c.log).Warn("bingx: trade parse failed", "symbol", symbol,
+					"partition", c.partition, "error", err)
+			}
+			c.recordDrop(trade.DropMalformedFrame, symbol)
 			continue
 		}
 
 		// Add to buffer (limit size)
 		if len(c.tradeBuffers[symbol]) < c.tradeBufferSize {
-			c.tradeBuffers[symbol] = append(c.tradeBuffers[symbol], trade)
+			c.tradeBuffers[symbol] = append(c.tradeBuffers[symbol], parsed)
 			if c.tradeBufferMax == nil {
 				c.tradeBufferMax = make(map[string]int)
 			}
@@ -851,8 +861,11 @@ func (c *BingXClient) handleTradeMessage(msg map[string]interface{}) {
 			}
 			c.tradesIn.Add(1)
 		} else {
-			c.tradesDropped.Add(1)
-			logger.OrDiscard(c.log).Warn("bingx: trade buffer full; dropping trade", "symbol", symbol)
+			if c.firstDropLog(trade.DropBufferOverflow, symbol) {
+				logger.OrDiscard(c.log).Warn("bingx: trade buffer full; dropping trade", "symbol", symbol,
+					"partition", c.partition, "cap", c.tradeBufferSize)
+			}
+			c.recordDrop(trade.DropBufferOverflow, symbol)
 		}
 	}
 	c.subsMu.Unlock()
@@ -981,6 +994,23 @@ func (c *BingXClient) recordDrop(reason trade.DropReason, symbol string) uint64 
 	}
 	c.metrics.incTradesDroppedClassified(c.config.ExchangeID, marketType.String(), symbol, c.partition, string(reason))
 	return total
+}
+
+// firstDropLog reports whether this (reason, symbol, partition) is being logged
+// for the first time. The counter keeps every loss; the log keeps one line per
+// location, so a hot symbol cannot hide another symbol's first overflow.
+func (c *BingXClient) firstDropLog(reason trade.DropReason, symbol string) bool {
+	c.dropLogMu.Lock()
+	defer c.dropLogMu.Unlock()
+	if c.dropLogged == nil {
+		c.dropLogged = make(map[string]struct{})
+	}
+	key := string(reason) + "|" + symbol + "|" + strconv.Itoa(c.partition)
+	if _, exists := c.dropLogged[key]; exists {
+		return false
+	}
+	c.dropLogged[key] = struct{}{}
+	return true
 }
 
 // handleDisconnect handles connection loss and triggers reconnection. It is the single entry

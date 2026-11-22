@@ -35,6 +35,11 @@ type BingXConnectionPool struct {
 	netdiag     *netdiag.Correlator
 	metrics     Metrics
 
+	// connectClient is the Connect seam: tests observe the client's partition
+	// AT CONNECT TIME, so moving SetPartition after Connect makes the test red.
+	// Nil falls back to the real client.Connect.
+	connectClient func(*BingXClient, context.Context) error
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -51,6 +56,7 @@ func newBingXPool(config ClientConfig, logs ...*slog.Logger) *BingXConnectionPoo
 		maxConnectionsPerIP:     resolvePositive(config.MaxConnectionsPerIP, DefaultBingXMaxConnectionsPerIP),
 		connections:             []*BingXClient{},
 		symbolMap:               make(map[string]int),
+		connectClient:           func(client *BingXClient, ctx context.Context) error { return client.Connect(ctx) },
 		ctx:                     ctx,
 		cancel:                  cancel,
 	}
@@ -119,7 +125,11 @@ func (p *BingXConnectionPool) Subscribe(ctx context.Context, symbol string) erro
 		client.SetNetdiag(p.netdiag)
 		client.SetMetrics(p.metrics)
 		client.SetPartition(connIndex)
-		if err := client.Connect(ctx); err != nil {
+		connect := p.connectClient
+		if connect == nil {
+			connect = func(client *BingXClient, ctx context.Context) error { return client.Connect(ctx) }
+		}
+		if err := connect(client, ctx); err != nil {
 			return fmt.Errorf("failed to connect a new connection: %w", err)
 		}
 
