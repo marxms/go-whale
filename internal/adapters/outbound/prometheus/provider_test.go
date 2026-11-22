@@ -182,6 +182,8 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 		"gowhale_stream_trades_buffer_fill", "gowhale_stream_trades_buffer_max_fill",
 		"gowhale_stream_trades_buffer_capacity",
 		"gowhale_stream_trades_buffer_last_drain_age_seconds",
+		"gowhale_stream_worker_busy_seconds_total", "gowhale_stream_worker_queue_depth",
+		"gowhale_stream_worker_in_flight",
 		// netdiag
 		"gowhale_netdiag_reconnect_scope_total",
 		// recovery
@@ -206,8 +208,8 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 			t.Errorf("%s is missing from the exposition — the metric was renamed, dropped or never registered", name)
 		}
 	}
-	if len(expected) != 96 {
-		t.Fatalf("inventory has %d names, want the 96 definitions T44 moved", len(expected))
+	if len(expected) != 99 {
+		t.Fatalf("inventory has %d names, want the 99 definitions T44 moved", len(expected))
 	}
 	// The histogram bucket boundaries are part of the wire contract.
 	assertBuckets(t, reg, "gowhale_coinalyze_cycle_duration_seconds", []float64{30, 60, 120, 240, 480, 960, 1920, 3840, 7680, 15360})

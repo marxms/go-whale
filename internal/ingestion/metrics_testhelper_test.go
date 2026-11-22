@@ -12,7 +12,10 @@ type testMetrics struct {
 	preregDiscard map[string]bool
 	preregMissing map[string]bool
 	preregAdmitt  map[string]bool
-	admittedGone  map[string]bool
+	admittedGone   map[string]bool
+	workerBusy     float64
+	workerQueue    int
+	workerInFlight int
 }
 
 func newTestMetrics() *testMetrics {
@@ -65,6 +68,11 @@ func (m *testMetrics) port() Metrics {
 		ForgetAdmitted: func(ex, mt string) {
 			delete(m.admitted, labels(ex, mt))
 			m.admittedGone[labels(ex, mt)] = true
+		},
+		AddWorkerBusy: func(seconds float64) { m.workerBusy += seconds },
+		SetWorkerQueue: func(queued, inFlight int) {
+			m.workerQueue = queued
+			m.workerInFlight = inFlight
 		},
 	}
 }

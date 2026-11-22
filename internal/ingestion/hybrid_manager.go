@@ -58,6 +58,7 @@ type HybridManager struct {
 	// Worker pool for processing trades
 	numWorkers   int
 	processQueue chan *HybridClientState
+	inFlightCount atomic.Int64
 
 	// Adaptive polling configuration
 	minProcessDelay time.Duration // Minimum delay (high activity / euforia)
@@ -503,6 +504,7 @@ func (m *HybridManager) publishBufferStats() {
 	for _, item := range samples {
 		m.metrics.setTradesBuffer(item.exchange, item.marketType, item.symbol, item.stats)
 	}
+	m.metrics.setWorkerQueue(len(m.processQueue), int(m.inFlightCount.Load()))
 }
 
 func (m *HybridManager) scheduleClients() {
@@ -547,7 +549,13 @@ func (m *HybridManager) worker(ctx context.Context, id int) {
 func (m *HybridManager) processClient(ctx context.Context, _ int, state *HybridClientState) {
 	// Release the in-flight claim on EVERY exit path, including the early returns below.
 	// A leaked claim would silently stop this symbol from ever being drained again.
-	defer state.inFlight.Store(false)
+	started := time.Now()
+	m.inFlightCount.Add(1)
+	defer func() {
+		state.inFlight.Store(false)
+		m.inFlightCount.Add(-1)
+		m.metrics.addWorkerBusy(time.Since(started).Seconds())
+	}()
 
 	// Get trades from client
 	trades, err := state.Client.GetTrades(ctx, state.Symbol)

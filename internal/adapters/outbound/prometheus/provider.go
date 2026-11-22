@@ -695,6 +695,22 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Help: "Seconds since this symbol's buffer last emptied. A rising value with a non-zero fill is a stalled drain, not an idle market.",
 	}, []string{labelExchange, labelMarketType, labelSymbol})
 
+	workerBusySeconds := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "worker_busy_seconds_total",
+		Help: "Aggregate time workers spent draining symbol buffers. Paired with queue/in-flight it separates a fast worker on an empty queue from a saturated pool.",
+	})
+	workerQueueDepth := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "worker_queue_depth",
+		Help: "Symbols waiting in the processing queue at sample time.",
+	})
+	workerInFlight := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "worker_in_flight",
+		Help: "Workers currently draining a symbol at sample time.",
+	})
+
 	p.ingestion = ingestion.Metrics{
 		TradesDiscarded:   func(ex, mt, reason string) { tradesDiscarded.WithLabelValues(ex, mt, reason).Inc() },
 		TradesMissing:     func(ex, mt string, n float64) { tradesMissing.WithLabelValues(ex, mt).Add(n) },
@@ -718,6 +734,11 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 			tradesBufferMaxFill.DeletePartialMatch(labels)
 			tradesBufferCapacity.DeletePartialMatch(labels)
 			tradesBufferLastDrainAge.DeletePartialMatch(labels)
+		},
+		AddWorkerBusy: func(seconds float64) { workerBusySeconds.Add(seconds) },
+		SetWorkerQueue: func(queued, inFlight int) {
+			workerQueueDepth.Set(float64(queued))
+			workerInFlight.Set(float64(inFlight))
 		},
 	}
 
@@ -861,6 +882,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		// ── Ingestion ─────────────────────────────────────────────────────
 		tradesDiscarded, tradesMissing, tradesMissingTail, admittedVolume,
 		tradesBufferFill, tradesBufferMaxFill, tradesBufferCapacity, tradesBufferLastDrainAge,
+		workerBusySeconds, workerQueueDepth, workerInFlight,
 		// ── Netdiag ───────────────────────────────────────────────────────
 		reconnectScope,
 		// ── Recovery ──────────────────────────────────────────────────────

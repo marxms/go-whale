@@ -35,6 +35,12 @@ type Metrics struct {
 	SetTradesBuffer    func(exchange, marketType, symbol string, current, max, capacity int, lastDrainAgeSeconds float64)
 	DeleteTradesBuffer func(exchange, marketType, symbol string)
 
+	// Worker utilization: time spent draining a symbol and the queue/in-flight
+	// depth at sample time. A tuning decision needs both, or a fast worker on an
+	// empty queue looks identical to a saturated pool.
+	AddWorkerBusy  func(seconds float64)
+	SetWorkerQueue func(queued, inFlight int)
+
 	// Pre-registration materializes a series at ZERO. Absence and zero are different
 	// answers, and only zero is evidence.
 	PreregisterDiscarded func(exchange, marketType, reason string)
@@ -89,6 +95,18 @@ func (m Metrics) setTradesBuffer(exchange, marketType, symbol string, stats stre
 func (m Metrics) deleteTradesBuffer(exchange, marketType, symbol string) {
 	if m.DeleteTradesBuffer != nil {
 		m.DeleteTradesBuffer(exchange, marketType, symbol)
+	}
+}
+
+func (m Metrics) addWorkerBusy(seconds float64) {
+	if m.AddWorkerBusy != nil {
+		m.AddWorkerBusy(seconds)
+	}
+}
+
+func (m Metrics) setWorkerQueue(queued, inFlight int) {
+	if m.SetWorkerQueue != nil {
+		m.SetWorkerQueue(queued, inFlight)
 	}
 }
 
