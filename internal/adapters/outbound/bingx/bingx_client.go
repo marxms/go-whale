@@ -89,9 +89,11 @@ type BingXClient struct {
 	connWg     sync.WaitGroup // Only tracks connection-scoped goroutines
 
 	// Internal per-symbol trade buffering
-	tradeBuffers  map[string][]trade.Trade
-	subscriptions map[string]bool // symbol -> subscribed
-	subsMu        sync.RWMutex
+	tradeBuffers         map[string][]trade.Trade
+	tradeBufferMax       map[string]int
+	tradeBufferLastDrain map[string]time.Time
+	subscriptions        map[string]bool // symbol -> subscribed
+	subsMu               sync.RWMutex
 
 	// Write mutex to prevent concurrent writes on the WebSocket
 	writeMu sync.Mutex
@@ -169,8 +171,10 @@ func NewBingXClient(config ClientConfig, logs ...*slog.Logger) *BingXClient {
 		config:           config,
 		log:              logger.OrDiscard(logs...),
 		tradeBufferSize:  bufSize,
-		tradeBuffers:     make(map[string][]trade.Trade),
-		subscriptions:    make(map[string]bool),
+		tradeBuffers:         make(map[string][]trade.Trade),
+		tradeBufferMax:       make(map[string]int),
+		tradeBufferLastDrain: make(map[string]time.Time),
+		subscriptions:        make(map[string]bool),
 		ctx:              ctx,
 		cancel:           cancel,
 		reconnectDelay:   InitialReconnectDelay,
@@ -386,6 +390,24 @@ func (c *BingXClient) GetBufferFillRatio(symbol string) float64 {
 	return float64(len(buffer)) / float64(c.tradeBufferSize)
 }
 
+// GetBufferStats is the timer-sampled snapshot: current fill, high-water mark,
+// resolved cap and last drain. The maps live under subsMu, the same lock that
+// guards the buffer itself, so the sample cannot tear.
+func (c *BingXClient) GetBufferStats(symbol string) (streaming.BufferStats, bool) {
+	c.subsMu.RLock()
+	defer c.subsMu.RUnlock()
+	buffer, ok := c.tradeBuffers[symbol]
+	if !ok {
+		return streaming.BufferStats{}, false
+	}
+	return streaming.BufferStats{
+		Current:   len(buffer),
+		Max:       c.tradeBufferMax[symbol],
+		Capacity:  c.tradeBufferSize,
+		LastDrain: c.tradeBufferLastDrain[symbol],
+	}, true
+}
+
 // GetTrades returns buffered trades and clears the buffer (implements StreamingClient).
 func (c *BingXClient) GetTrades(ctx context.Context, symbol string) ([]trade.Trade, error) {
 	if c.closed() {
@@ -414,6 +436,12 @@ func (c *BingXClient) GetTrades(ctx context.Context, symbol string) ([]trade.Tra
 	// buffer.go Flush already does, so the consumer owns its slice.
 	out := make([]trade.Trade, len(buf))
 	copy(out, buf)
+	// The drain clock moves only when trades actually left the buffer; an
+	// empty poll must not refresh it and mask a stalled drain.
+	if c.tradeBufferLastDrain == nil {
+		c.tradeBufferLastDrain = make(map[string]time.Time)
+	}
+	c.tradeBufferLastDrain[symbol] = time.Now()
 	c.tradeBuffers[symbol] = buf[:0]
 	c.subsMu.Unlock()
 
@@ -815,6 +843,12 @@ func (c *BingXClient) handleTradeMessage(msg map[string]interface{}) {
 		// Add to buffer (limit size)
 		if len(c.tradeBuffers[symbol]) < c.tradeBufferSize {
 			c.tradeBuffers[symbol] = append(c.tradeBuffers[symbol], trade)
+			if c.tradeBufferMax == nil {
+				c.tradeBufferMax = make(map[string]int)
+			}
+			if len(c.tradeBuffers[symbol]) > c.tradeBufferMax[symbol] {
+				c.tradeBufferMax[symbol] = len(c.tradeBuffers[symbol])
+			}
 			c.tradesIn.Add(1)
 		} else {
 			c.tradesDropped.Add(1)

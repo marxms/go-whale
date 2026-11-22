@@ -49,6 +49,7 @@ func (a *App) buildIngestion(cfg config.Config, tfReg *candle.TimeframeRegistry)
 		market.BingX.String():   bingxFactory.For,
 	}, a.log)
 	a.manager.SetTradeBufferSize(cfg.TradeBufferSize)
+	a.manager.SetMetrics(a.ingestionMetrics)
 
 	// Configure route-specific limits.
 	for _, exCfg := range cfg.Exchanges {

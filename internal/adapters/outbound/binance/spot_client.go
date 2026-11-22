@@ -60,6 +60,8 @@ type SpotSDKClient struct {
 	reconnecting   atomic.Bool
 	reconnectMu    sync.Mutex
 	reconnectCh    chan string // buffered(1); signals the reconnect worker (deduped)
+	dropLogMu      sync.Mutex
+	dropLogged     map[string]struct{}
 
 	connected     atomic.Bool
 	lastMessageAt atomic.Value
@@ -367,14 +369,18 @@ func (c *SpotSDKClient) tradeCallback(symbol string, partition int) binancews.Ha
 	return func(data []byte) {
 		defer func() {
 			if r := recover(); r != nil {
-				logger.OrDiscard(c.log).Error("panic in spot trade callback", "symbol", symbol, "panic", r)
+				if c.firstDropLog(trade.DropPanic, symbol, partition) {
+					logger.OrDiscard(c.log).Error("panic in spot trade callback", "symbol", symbol, "partition", partition, "panic", r)
+				}
 				c.recordDrop(trade.DropPanic, symbol, partition)
 			}
 		}()
 
 		var msg tradeEvent
 		if err := json.Unmarshal(data, &msg); err != nil {
-			logger.OrDiscard(c.log).Warn("spot trade callback: malformed frame", "symbol", symbol, "error", err)
+			if c.firstDropLog(trade.DropMalformedFrame, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("spot trade callback: malformed frame", "symbol", symbol, "partition", partition, "error", err)
+			}
 			c.recordDrop(trade.DropMalformedFrame, symbol, partition)
 			return
 		}
@@ -386,6 +392,9 @@ func (c *SpotSDKClient) tradeCallback(symbol string, partition int) binancews.Ha
 
 		domainTrade := c.toDomainTrade(&msg)
 		if domainTrade == nil {
+			if c.firstDropLog(trade.DropNilTrade, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("spot trade callback: empty trade payload", "symbol", symbol, "partition", partition)
+			}
 			c.recordDrop(trade.DropNilTrade, symbol, partition)
 			return
 		}
@@ -393,7 +402,10 @@ func (c *SpotSDKClient) tradeCallback(symbol string, partition int) binancews.Ha
 		// Same disjoint-branch contract as the futures callback: ingested means BUFFERED.
 		buf := c.buffers.GetOrCreate(symbol)
 		if buf.Append(*domainTrade) {
-			logger.OrDiscard(c.log).Warn("spot trade buffer overflow; trade dropped", "symbol", symbol, "cap", c.config.TradeBufferSize)
+			if c.firstDropLog(trade.DropBufferOverflow, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("spot trade buffer overflow; trade dropped (first for location)",
+					"symbol", symbol, "partition", partition, "cap", c.config.TradeBufferSize)
+			}
 			c.recordDrop(trade.DropBufferOverflow, symbol, partition)
 			return
 		}
@@ -753,6 +765,11 @@ func (c *SpotSDKClient) GetBufferFillRatio(symbol string) float64 {
 	return float64(buf.Len()) / float64(c.bufCap)
 }
 
+// GetBufferStats is the timer-sampled snapshot for the spot buffer.
+func (c *SpotSDKClient) GetBufferStats(symbol string) (streaming.BufferStats, bool) {
+	return c.buffers.GetBufferStats(symbol)
+}
+
 // Type returns the client type.
 func (c *SpotSDKClient) Type() streaming.ClientType {
 	return streaming.ClientTypeNative
@@ -845,6 +862,22 @@ func (c *SpotSDKClient) recordDrop(reason trade.DropReason, symbol string, parti
 	c.metrics.incTradesDropped(venueBinance, marketTypeSpot)
 	c.metrics.incTradesDroppedClassified(venueBinance, marketTypeSpot, symbol, partition, string(reason))
 	return total
+}
+
+// firstDropLog reports whether this location is being logged for the first
+// time. One line per (reason, symbol, partition); the counter keeps every loss.
+func (c *SpotSDKClient) firstDropLog(reason trade.DropReason, symbol string, partition int) bool {
+	c.dropLogMu.Lock()
+	defer c.dropLogMu.Unlock()
+	if c.dropLogged == nil {
+		c.dropLogged = make(map[string]struct{})
+	}
+	key := string(reason) + "|" + symbol + "|" + strconv.Itoa(partition)
+	if _, exists := c.dropLogged[key]; exists {
+		return false
+	}
+	c.dropLogged[key] = struct{}{}
+	return true
 }
 
 // triggerGapRecovery triggers gap recovery for all symbols after a reconnect.

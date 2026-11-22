@@ -674,6 +674,27 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Help: "Sum of the base-asset quantity of every trade admitted into the aggregator. Compare against engine_applied_delta_volume_total for the same scope: equal means the shortfall is upstream of this process, greater means it is ours.",
 	}, []string{labelExchange, labelMarketType})
 
+	tradesBufferFill := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_buffer_fill",
+		Help: "Trades currently held by a symbol buffer, sampled every 500 ms. Not on the ingest hot path.",
+	}, []string{labelExchange, labelMarketType, labelSymbol})
+	tradesBufferMaxFill := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_buffer_max_fill",
+		Help: "High-water mark of a symbol buffer since the client was created. A drained buffer keeps the evidence of its burst.",
+	}, []string{labelExchange, labelMarketType, labelSymbol})
+	tradesBufferCapacity := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_buffer_capacity",
+		Help: "Resolved per-symbol capacity the buffer refuses at (the configured cap or its fallback).",
+	}, []string{labelExchange, labelMarketType, labelSymbol})
+	tradesBufferLastDrainAge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_buffer_last_drain_age_seconds",
+		Help: "Seconds since this symbol's buffer last emptied. A rising value with a non-zero fill is a stalled drain, not an idle market.",
+	}, []string{labelExchange, labelMarketType, labelSymbol})
+
 	p.ingestion = ingestion.Metrics{
 		TradesDiscarded:   func(ex, mt, reason string) { tradesDiscarded.WithLabelValues(ex, mt, reason).Inc() },
 		TradesMissing:     func(ex, mt string, n float64) { tradesMissing.WithLabelValues(ex, mt).Add(n) },
@@ -685,6 +706,19 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		PreregisterMissing:  func(ex, mt string) { tradesMissing.WithLabelValues(ex, mt) },
 		PreregisterAdmitted: func(ex, mt string) { admittedVolume.WithLabelValues(ex, mt) },
 		ForgetAdmitted:      func(ex, mt string) { admittedVolume.DeleteLabelValues(ex, mt) },
+		SetTradesBuffer: func(ex, mt, symbol string, current, max, capacity int, lastDrainAgeSeconds float64) {
+			tradesBufferFill.WithLabelValues(ex, mt, symbol).Set(float64(current))
+			tradesBufferMaxFill.WithLabelValues(ex, mt, symbol).Set(float64(max))
+			tradesBufferCapacity.WithLabelValues(ex, mt, symbol).Set(float64(capacity))
+			tradesBufferLastDrainAge.WithLabelValues(ex, mt, symbol).Set(lastDrainAgeSeconds)
+		},
+		DeleteTradesBuffer: func(ex, mt, symbol string) {
+			labels := prometheus.Labels{labelExchange: ex, labelMarketType: mt, labelSymbol: symbol}
+			tradesBufferFill.DeletePartialMatch(labels)
+			tradesBufferMaxFill.DeletePartialMatch(labels)
+			tradesBufferCapacity.DeletePartialMatch(labels)
+			tradesBufferLastDrainAge.DeletePartialMatch(labels)
+		},
 	}
 
 	// Netdiag.
@@ -826,6 +860,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		redisOccupancy, redisKeysWithoutTTL, redisKeysTotal, redisEvictedKeys, redisAlert,
 		// ── Ingestion ─────────────────────────────────────────────────────
 		tradesDiscarded, tradesMissing, tradesMissingTail, admittedVolume,
+		tradesBufferFill, tradesBufferMaxFill, tradesBufferCapacity, tradesBufferLastDrainAge,
 		// ── Netdiag ───────────────────────────────────────────────────────
 		reconnectScope,
 		// ── Recovery ──────────────────────────────────────────────────────

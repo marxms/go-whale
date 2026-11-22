@@ -1,5 +1,11 @@
 package ingestion
 
+import (
+	"time"
+
+	"github.com/marxms/go-whale/internal/ingestion/streaming"
+)
+
 // Metrics is the ingestion observability port. The zero value is a safe no-op.
 //
 // tradesDiscarded counts trades dropped by deduplication, by reason. These drop points are
@@ -22,6 +28,12 @@ type Metrics struct {
 	TradesMissing     func(exchange, marketType string, n float64)
 	TradesMissingTail func(exchange, marketType string, n float64)
 	AdmittedVolume    func(exchange, marketType string, volume float64)
+
+	// TradesBuffer* publish the per-symbol buffer snapshot sampled every 500 ms.
+	// DeleteTradesBuffer removes the series when a symbol is unsubscribed or
+	// repartitioned; a stale series reads as a live buffer forever.
+	SetTradesBuffer    func(exchange, marketType, symbol string, current, max, capacity int, lastDrainAgeSeconds float64)
+	DeleteTradesBuffer func(exchange, marketType, symbol string)
 
 	// Pre-registration materializes a series at ZERO. Absence and zero are different
 	// answers, and only zero is evidence.
@@ -60,6 +72,23 @@ func (m Metrics) addMissingTail(exchange, marketType string, n float64) {
 func (m Metrics) addAdmitted(exchange, marketType string, volume float64) {
 	if m.AdmittedVolume != nil {
 		m.AdmittedVolume(exchange, marketType, volume)
+	}
+}
+
+func (m Metrics) setTradesBuffer(exchange, marketType, symbol string, stats streaming.BufferStats) {
+	if m.SetTradesBuffer == nil {
+		return
+	}
+	age := 0.0
+	if !stats.LastDrain.IsZero() {
+		age = time.Since(stats.LastDrain).Seconds()
+	}
+	m.SetTradesBuffer(exchange, marketType, symbol, stats.Current, stats.Max, stats.Capacity, age)
+}
+
+func (m Metrics) deleteTradesBuffer(exchange, marketType, symbol string) {
+	if m.DeleteTradesBuffer != nil {
+		m.DeleteTradesBuffer(exchange, marketType, symbol)
 	}
 }
 

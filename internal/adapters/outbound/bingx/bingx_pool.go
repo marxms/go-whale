@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marxms/go-whale/internal/ingestion/streaming"
 	logger "github.com/marxms/go-whale/internal/platform/logging"
 	"github.com/marxms/go-whale/internal/platform/netdiag"
 	"github.com/marxms/go-whale/internal/trade"
@@ -311,7 +312,8 @@ func (p *BingXConnectionPool) countSymbolsInConnection(connIndex int) int {
 // the loss is silent — a consumer's type assertion just returns ok=false.
 var (
 	_ StreamingClient = (*BingXConnectionPool)(nil)
-	_ BufferFillAware = (*BingXConnectionPool)(nil)
+	_ BufferFillAware  = (*BingXConnectionPool)(nil)
+	_ BufferStatsAware = (*BingXConnectionPool)(nil)
 	_ StatsProvider   = (*BingXConnectionPool)(nil)
 )
 
@@ -334,6 +336,18 @@ func (p *BingXConnectionPool) GetBufferFillRatio(symbol string) float64 {
 		return 0
 	}
 	return p.connections[connIndex].GetBufferFillRatio(symbol)
+}
+
+// GetBufferStats forwards the timer-sampled snapshot to the owning connection.
+func (p *BingXConnectionPool) GetBufferStats(symbol string) (streaming.BufferStats, bool) {
+	p.mu.RLock()
+	connIndex, exists := p.symbolMap[symbol]
+	conns := len(p.connections)
+	p.mu.RUnlock()
+	if !exists || connIndex >= conns {
+		return streaming.BufferStats{}, false
+	}
+	return p.connections[connIndex].GetBufferStats(symbol)
 }
 
 // NOTE (deliberately not fixed here): BingXConnectionPool does NOT implement

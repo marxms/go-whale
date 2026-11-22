@@ -69,6 +69,11 @@ type BackpressureSource interface {
 	GetBufferFillRatio(symbol string) float64
 }
 
+// BufferStatsSource is the optional capability through which a Source reports
+// exact fill, max fill, resolved cap and last-drain time per symbol. The
+// sampler reads it on a timer, not on the ingest path.
+type BufferStatsSource = streaming.BufferStatsAware
+
 // ReconnectSink is the consumer-owned notification port a Source calls after a completed
 // reconnect. It is deliberately narrow: one batch for every symbol that was restored,
 // with the disconnect window the recovery path must repair.
@@ -94,6 +99,7 @@ type StatsSource interface {
 var (
 	_ Source             = streaming.StreamingClient(nil)
 	_ BackpressureSource = streaming.BufferFillAware(nil)
+	_ BufferStatsSource  = streaming.BufferStatsAware(nil)
 	_ SharedSource       = streaming.SharedSubscriptionClient(nil)
 	_ ReconnectSink      = streaming.GapRecoveryQueue(nil)
 	_ StatsSource        = streaming.StatsProvider(nil)

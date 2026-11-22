@@ -86,6 +86,8 @@ type SDKClient struct {
 	partitionStabilityMu sync.Mutex
 	partitionUpSince     map[int]time.Time
 	partitionShortStreak map[int]int
+	dropLogMu            sync.Mutex
+	dropLogged           map[string]struct{}
 
 	// State
 	connected     atomic.Bool
@@ -672,14 +674,18 @@ func (c *SDKClient) tradeCallback(symbol string, partition int) binancews.Handle
 	return func(data []byte) {
 		defer func() {
 			if r := recover(); r != nil {
-				logger.OrDiscard(c.log).Error("panic in binance trade callback", "symbol", symbol, "panic", r)
+				if c.firstDropLog(trade.DropPanic, symbol, partition) {
+					logger.OrDiscard(c.log).Error("panic in binance trade callback", "symbol", symbol, "partition", partition, "panic", r)
+				}
 				c.recordDrop(trade.DropPanic, symbol, partition)
 			}
 		}()
 
 		var event tradeEvent
 		if err := json.Unmarshal(data, &event); err != nil {
-			logger.OrDiscard(c.log).Warn("binance trade callback: malformed frame", "symbol", symbol, "error", err)
+			if c.firstDropLog(trade.DropMalformedFrame, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("binance trade callback: malformed frame", "symbol", symbol, "partition", partition, "error", err)
+			}
 			c.recordDrop(trade.DropMalformedFrame, symbol, partition)
 			return
 		}
@@ -701,6 +707,9 @@ func (c *SDKClient) tradeCallback(symbol string, partition int) binancews.Handle
 
 		domainTrade := c.toDomainTrade(&event)
 		if domainTrade == nil {
+			if c.firstDropLog(trade.DropNilTrade, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("binance trade callback: empty trade payload", "symbol", symbol, "partition", partition)
+			}
 			c.recordDrop(trade.DropNilTrade, symbol, partition)
 			return
 		}
@@ -711,13 +720,14 @@ func (c *SDKClient) tradeCallback(symbol string, partition int) binancews.Handle
 		// branches are disjoint and their sum is the parsed count.
 		buf := c.buffers.GetOrCreate(symbol)
 		if buf.Append(*domainTrade) {
-			total := c.recordDrop(trade.DropBufferOverflow, symbol, partition)
-			// The counter carries every loss; the log carries the first one, so a sustained
-			// overflow cannot drown the line that says it started.
-			if total == 1 {
-				logger.OrDiscard(c.log).Warn("trade buffer overflow; trade dropped (first)",
-					"symbol", symbol, "cap", c.config.TradeBufferSize, "total", total)
+			// The counter carries every loss; the log carries the FIRST one per
+			// symbol/partition, so a sustained overflow cannot drown the line
+			// that says it started and one hot symbol cannot hide another.
+			if c.firstDropLog(trade.DropBufferOverflow, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("trade buffer overflow; trade dropped (first for location)",
+					"symbol", symbol, "partition", partition, "cap", c.config.TradeBufferSize)
 			}
+			c.recordDrop(trade.DropBufferOverflow, symbol, partition)
 			return
 		}
 		c.tradesIn.Add(1)
@@ -1358,6 +1368,12 @@ func (c *SDKClient) GetBufferFillRatio(symbol string) float64 {
 	return float64(buf.Len()) / float64(c.bufCap)
 }
 
+// GetBufferStats is the timer-sampled snapshot: exact fill, max fill,
+// resolved cap and last drain. It never runs on the ingest hot path.
+func (c *SDKClient) GetBufferStats(symbol string) (streaming.BufferStats, bool) {
+	return c.buffers.GetBufferStats(symbol)
+}
+
 // Type returns the client type.
 func (c *SDKClient) Type() streaming.ClientType {
 	return streaming.ClientTypeNative
@@ -1462,6 +1478,23 @@ func (c *SDKClient) recordDrop(reason trade.DropReason, symbol string, partition
 	c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
 	c.metrics.incTradesDroppedClassified(venueBinance, marketTypeFuture, symbol, partition, string(reason))
 	return total
+}
+
+// firstDropLog reports whether this (reason, symbol, partition) is being logged
+// for the first time. The counter keeps every loss; the log keeps one line per
+// location so a sustained condition cannot drown the evidence that it started.
+func (c *SDKClient) firstDropLog(reason trade.DropReason, symbol string, partition int) bool {
+	c.dropLogMu.Lock()
+	defer c.dropLogMu.Unlock()
+	if c.dropLogged == nil {
+		c.dropLogged = make(map[string]struct{})
+	}
+	key := string(reason) + "|" + symbol + "|" + strconv.Itoa(partition)
+	if _, exists := c.dropLogged[key]; exists {
+		return false
+	}
+	c.dropLogged[key] = struct{}{}
+	return true
 }
 
 // triggerGapRecovery triggers gap recovery for all symbols after a reconnect.

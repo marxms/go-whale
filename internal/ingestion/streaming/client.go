@@ -96,6 +96,23 @@ type BufferFillAware interface {
 	GetBufferFillRatio(symbol string) float64
 }
 
+// BufferStats is the per-symbol trade-buffer snapshot the sampler publishes.
+// Current and Max are counts, Capacity is the resolved cap, and LastDrain is
+// when the buffer was last emptied (zero before the first drain).
+type BufferStats struct {
+	Current   int
+	Max       int
+	Capacity  int
+	LastDrain time.Time
+}
+
+// BufferStatsAware is the optional interface through which a Source exposes
+// the exact fill, max fill, resolved cap and drain clock per symbol. It is
+// sampled on a timer, never per trade, so the hot path pays nothing.
+type BufferStatsAware interface {
+	GetBufferStats(symbol string) (BufferStats, bool)
+}
+
 // SharedSubscriptionClient marks clients that multiplex multiple symbols
 // over shared transport resources and should not be closed from per-symbol unsubscribe paths.
 type SharedSubscriptionClient interface {

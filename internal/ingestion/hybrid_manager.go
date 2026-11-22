@@ -45,6 +45,7 @@ type HybridClientState struct {
 // HybridManager manages streaming through native WebSocket clients.
 type HybridManager struct {
 	handler       TradeHandler
+	metrics       Metrics
 	limitsByRoute map[string]StreamLimits
 
 	clients map[string]*HybridClientState // key: exchange:marketType:symbol
@@ -197,6 +198,10 @@ func (m *HybridManager) SetGapRecovery(gr streaming.GapRecoveryQueue) {
 	logger.OrDiscard(m.log).Info("hybrid manager: gap recovery manager configured")
 }
 
+// SetMetrics injects the ingestion observability port used by the 500 ms
+// buffer sampler and by series deletion on unsubscribe.
+func (m *HybridManager) SetMetrics(metrics Metrics) { m.metrics = metrics }
+
 // SetTradeBufferSize sets the per-symbol trade buffer size for native clients.
 func (m *HybridManager) SetTradeBufferSize(size int) {
 	m.tradeBufferSize = size
@@ -326,6 +331,7 @@ func (m *HybridManager) Unsubscribe(symbol, exchangeID string, marketType market
 		return nil
 	}
 	delete(m.clients, key)
+	m.metrics.deleteTradesBuffer(exchangeID, marketType.String(), symbol)
 
 	// Check if any other subscription shares the same client (pooled connections)
 	clientShared := false
@@ -398,6 +404,7 @@ func (m *HybridManager) adaptiveDelayCalculator(ctx context.Context) {
 			oldDelay := m.currentDelay
 			m.currentDelay = newDelay
 			m.delayMu.Unlock()
+			m.publishBufferStats()
 
 			// Log significant delay changes
 			if newDelay != oldDelay {
@@ -459,6 +466,42 @@ func processDelayForFill(fill float64, minDelay, maxDelay time.Duration) time.Du
 	default:
 		// Empty buffers (<30%) — save CPU
 		return maxDelay
+	}
+}
+
+// publishBufferStats samples every client's exact buffer snapshot and publishes
+// current fill, max fill, resolved capacity and last-drain age per symbol. It
+// runs on the existing 500 ms ticker, so the ingest hot path never pays for it.
+// The snapshot is collected under RLock and published after releasing it, so a
+// slow metrics backend cannot block subscription changes.
+func (m *HybridManager) publishBufferStats() {
+	type sample struct {
+		exchange   string
+		marketType string
+		symbol     string
+		stats      streaming.BufferStats
+	}
+	m.mu.RLock()
+	samples := make([]sample, 0, len(m.clients))
+	for _, state := range m.clients {
+		aware, ok := state.Client.(BufferStatsSource)
+		if !ok {
+			continue
+		}
+		stats, ok := aware.GetBufferStats(state.Symbol)
+		if !ok {
+			continue
+		}
+		samples = append(samples, sample{
+			exchange:   state.Exchange,
+			marketType: state.MarketType.String(),
+			symbol:     state.Symbol,
+			stats:      stats,
+		})
+	}
+	m.mu.RUnlock()
+	for _, item := range samples {
+		m.metrics.setTradesBuffer(item.exchange, item.marketType, item.symbol, item.stats)
 	}
 }
 
@@ -537,6 +580,7 @@ func (m *HybridManager) Stop() {
 		// Shutdown teardown — unactionable, discarded explicitly.
 		_ = state.Client.Unsubscribe(state.Symbol)
 		_ = state.Client.Close()
+		m.metrics.deleteTradesBuffer(state.Exchange, state.MarketType.String(), state.Symbol)
 		delete(m.clients, key)
 	}
 	m.mu.Unlock()
