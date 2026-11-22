@@ -203,7 +203,7 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 			t.Errorf("%s is missing from the exposition — the metric was renamed, dropped or never registered", name)
 		}
 	}
-	if len(expected) != 91 {
+	if len(expected) != 92 {
 		t.Fatalf("inventory has %d names, want the 91 definitions T44 moved", len(expected))
 	}
 	// The histogram bucket boundaries are part of the wire contract.
