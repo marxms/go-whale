@@ -2,6 +2,9 @@ package ingestion
 
 import (
 	"context"
+	"errors"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,4 +76,134 @@ func TestWorkerBusyAndQueueMetrics(t *testing.T) {
 		t.Fatalf("published in-flight=%d with an idle worker, want 0", metrics.workerInFlight)
 	}
 	<-manager.processQueue
+}
+
+type errorSource struct{ fillSource }
+
+func (e *errorSource) GetTrades(context.Context, string) ([]trade.Trade, error) {
+	return nil, errors.New("boom")
+}
+
+// An error on the drain path must release the in-flight claim and still count
+// busy time; a leaked claim would stop the symbol from ever being drained.
+func TestWorkerErrorReleasesInFlight(t *testing.T) {
+	metrics := newTestMetrics()
+	manager := NewHybridManager(nil, 1, nil)
+	manager.SetMetrics(metrics.port())
+	state := &HybridClientState{
+		Client: &errorSource{}, Symbol: "BTC/USDT",
+		Exchange: "binance", MarketType: market.Future, Key: "binance:future:BTC/USDT",
+	}
+	state.inFlight.Store(true)
+
+	manager.processClient(context.Background(), 0, state)
+
+	if state.inFlight.Load() {
+		t.Fatal("error path leaked the in-flight claim")
+	}
+	if got := manager.inFlightCount.Load(); got != 0 {
+		t.Fatalf("in-flight count=%d after an error, want 0", got)
+	}
+	if metrics.workerBusy <= 0 {
+		t.Fatalf("worker busy=%v after an error path, want > 0", metrics.workerBusy)
+	}
+}
+
+// With the claim already held, concurrent schedulers must enqueue nothing. If
+// the CAS were removed, every goroutine would enqueue the same symbol.
+func TestScheduleClientsConcurrentRespectsClaim(t *testing.T) {
+	manager := NewHybridManager(nil, 4, nil)
+	state := &HybridClientState{Key: "binance:future:BTC/USDT"}
+	state.inFlight.Store(true)
+	manager.clients[state.Key] = state
+
+	var wg sync.WaitGroup
+	for index := 0; index < 64; index += 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			manager.scheduleClients()
+		}()
+	}
+	wg.Wait()
+
+	if got := len(manager.processQueue); got != 0 {
+		t.Fatalf("queue=%d with the claim held, want 0 — the CAS was bypassed", got)
+	}
+}
+
+type sequenceSource struct {
+	fillSource
+	mu      sync.Mutex
+	batches [][]trade.Trade
+	next    int
+}
+
+func (s *sequenceSource) GetTrades(context.Context, string) ([]trade.Trade, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.next >= len(s.batches) {
+		return nil, nil
+	}
+	batch := s.batches[s.next]
+	s.next++
+	return batch, nil
+}
+
+type recordingHandler struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (h *recordingHandler) HandleTrades(string, any) error { return nil }
+
+func (h *recordingHandler) HandleTradesWithContext(_ context.Context, _, _, _ string, trades any) error {
+	batch, _ := trades.([]trade.Trade)
+	ids := ""
+	for index, item := range batch {
+		if index > 0 {
+			ids += ","
+		}
+		ids += item.ID
+	}
+	h.mu.Lock()
+	h.seen = append(h.seen, ids)
+	h.mu.Unlock()
+	return nil
+}
+
+// The worker drains one batch per claim and releases it; the next tick sees the
+// next batch. Per-symbol order is preserved by construction, which is the
+// precondition the watermark relies on.
+func TestWorkerProcessesBatchInOrderPerSymbol(t *testing.T) {
+	batch := func(from, to int64) []trade.Trade {
+		base := time.Now().Add(-30 * time.Second)
+		out := make([]trade.Trade, 0, to-from+1)
+		for id := from; id <= to; id++ {
+			out = append(out, trade.Trade{
+				ID: strconv.FormatInt(id, 10), Symbol: "BTC/USDT", Price: 100, Amount: 1,
+				Side: trade.Buy, Timestamp: base.Add(time.Duration(id) * time.Millisecond).UnixMilli(),
+			})
+		}
+		return out
+	}
+	recorder := &recordingHandler{}
+	manager := NewHybridManager(recorder, 1, nil)
+	state := &HybridClientState{
+		Client: &sequenceSource{batches: [][]trade.Trade{batch(1, 2), batch(3, 4)}},
+		Symbol: "BTC/USDT", Exchange: "binance", MarketType: market.Future,
+		Key: "binance:future:BTC/USDT",
+	}
+
+	manager.processClient(context.Background(), 0, state)
+	manager.processClient(context.Background(), 0, state)
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.seen) != 2 || recorder.seen[0] != "1,2" || recorder.seen[1] != "3,4" {
+		t.Fatalf("handler saw %v, want [1,2] then [3,4] in order", recorder.seen)
+	}
+	if state.inFlight.Load() {
+		t.Fatal("claim leaked between batches")
+	}
 }
