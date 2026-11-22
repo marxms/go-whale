@@ -194,6 +194,11 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Name: "trades_dropped_total",
 		Help: "Trades LOST by exchange and market type (parse failure, callback panic, or an append refused by a full buffer). Excludes trades that were stored.",
 	}, []string{labelExchange, labelMarketType})
+	tradesDroppedClassified := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
+		Name: "trades_dropped_classified_total",
+		Help: "Trades LOST locally with the reason, symbol and real connection partition. Its delta sums to trades_dropped_total; a drop without a location is unmeasured.",
+	}, []string{labelExchange, labelMarketType, labelSymbol, "partition", labelReason})
 	tradesIngested := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "trades_ingested_total",
@@ -260,6 +265,9 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		HealthState:                   func(ex, mt string, state float64) { healthState.WithLabelValues(ex, mt).Set(state) },
 		MessagesInTotal:               func(ex, mt string) { messagesIn.WithLabelValues(ex, mt).Inc() },
 		TradesDroppedTotal:            func(ex, mt string) { tradesDropped.WithLabelValues(ex, mt).Inc() },
+		TradesDroppedClassified: func(ex, mt, symbol string, partition int, reason string) {
+			tradesDroppedClassified.WithLabelValues(ex, mt, symbol, strconv.Itoa(partition), reason).Inc()
+		},
 		TradesIngestedTotal:           func(ex, mt string) { tradesIngested.WithLabelValues(ex, mt).Inc() },
 		ReconnectSignalsDropped:       func(ex, mt string) { reconnectSignalsDropped.WithLabelValues(ex, mt).Inc() },
 		ResubscribeIncompleteTotal:    func(ex, mt string, n float64) { resubscribeIncomplete.WithLabelValues(ex, mt).Add(n) },
@@ -782,7 +790,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		// ── Binance ──────────────────────────────────────────────────────
 		goroutinesTotal, reconnectAttempts, reconnectFailures, disconnectCause,
 		lastMessageAge, partitionStale, healthState, messagesIn, tradesDropped,
-		tradesIngested, reconnectSignalsDropped, resubscribeIncomplete,
+		tradesDroppedClassified, tradesIngested, reconnectSignalsDropped, resubscribeIncomplete,
 		resubscribeUnverified, dynamicSubscribeDeferred, starvationSuppressed,
 		klineFramesTotal, klineFramesRejected, klineSymbolsAttached, klinePartitionFrames, klineRoute,
 		// ── Realtime ─────────────────────────────────────────────────────

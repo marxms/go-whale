@@ -14,7 +14,7 @@ func TestTradeBufferFirstDropLogsOnce(t *testing.T) {
 	client := &SDKClient{buffers: NewBufferManager(0), log: log}
 	payload := []byte(`{"e":"aggTrade","s":"BTC/USDT","a":1,"p":"101.5","q":"2","T":1793882096789,"m":false}`)
 
-	handler := client.tradeCallback("BTC/USDT")
+	handler := client.tradeCallback("BTC/USDT", 0)
 	handler(payload)
 	handler(payload)
 	handler(payload)

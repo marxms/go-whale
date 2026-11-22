@@ -64,7 +64,7 @@ func TestAggTradeCallbackParsesWirePayload(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	c.tradeCallback("BTC/USDT")(payload)
+	c.tradeCallback("BTC/USDT", 0)(payload)
 	if got := c.buffers.GetOrCreate("BTC/USDT").Len(); got != 1 {
 		t.Fatalf("buffered = %d, want 1 (messagesIn=%d dropped=%d)", got, c.messagesIn.Load(), c.tradesDropped.Load())
 	}
@@ -214,7 +214,7 @@ func TestStreamNameUsesIndividualTradeStream(t *testing.T) {
 func TestTradeCallbackKeepsIndividualTradeID(t *testing.T) {
 	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, buffers: NewBufferManager(10)}
 	payload := []byte(`{"e":"trade","s":"BTC/USDT","t":987654321,"p":"101.5","q":"2","T":1793882096789,"m":false}`)
-	c.tradeCallback("BTC/USDT")(payload)
+	c.tradeCallback("BTC/USDT", 0)(payload)
 	trades := c.buffers.GetOrCreate("BTC/USDT").Flush()
 	if len(trades) != 1 {
 		t.Fatalf("buffered trades = %d, want 1", len(trades))

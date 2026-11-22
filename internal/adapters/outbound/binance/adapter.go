@@ -570,7 +570,7 @@ func (c *SDKClient) connectAndResubscribeCombined(symbols []string) (int, error)
 			if c.livenessLedgerEnabled {
 				c.ledger.Assign(symbol, i)
 			}
-			handlers[streamName(symbol)] = c.tradeCallback(symbol)
+			handlers[streamName(symbol)] = c.tradeCallback(symbol, i)
 		}
 		logger.OrDiscard(c.log).Info("binance ws: combined-URL connect partition",
 			"partition", i+1, "partitions", len(parts), "streams", len(slice))
@@ -647,7 +647,7 @@ func (c *SDKClient) Subscribe(ctx context.Context, symbol string) error {
 		return nil
 	}
 
-	if err := conn.Subscribe(ctx, streamName(symbol), c.tradeCallback(symbol)); err != nil {
+	if err := conn.Subscribe(ctx, streamName(symbol), c.tradeCallback(symbol, conn.ID)); err != nil {
 		return fmt.Errorf("failed to subscribe to %s aggTrade: %w", symbol, err)
 	}
 	if c.livenessLedgerEnabled {
@@ -668,21 +668,19 @@ func (c *SDKClient) Subscribe(ctx context.Context, symbol string) error {
 // tradeCallback returns the per-symbol message handler. Shared by Subscribe
 // (dynamic add) and the combined-URL resubscribe path so both record metrics,
 // parse, and buffer identically.
-func (c *SDKClient) tradeCallback(symbol string) binancews.Handler {
+func (c *SDKClient) tradeCallback(symbol string, partition int) binancews.Handler {
 	return func(data []byte) {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.OrDiscard(c.log).Error("panic in binance trade callback", "symbol", symbol, "panic", r)
-				c.tradesDropped.Add(1)
-				c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+				c.recordDrop(trade.DropPanic, symbol, partition)
 			}
 		}()
 
 		var event tradeEvent
 		if err := json.Unmarshal(data, &event); err != nil {
 			logger.OrDiscard(c.log).Warn("binance trade callback: malformed frame", "symbol", symbol, "error", err)
-			c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+			c.recordDrop(trade.DropMalformedFrame, symbol, partition)
 			return
 		}
 
@@ -701,10 +699,9 @@ func (c *SDKClient) tradeCallback(symbol string) binancews.Handler {
 		// with the real age computed from c.lastMessageAt.
 		c.metrics.incMessagesIn(venueBinance, marketTypeFuture)
 
-		trade := c.toDomainTrade(&event)
-		if trade == nil {
-			c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+		domainTrade := c.toDomainTrade(&event)
+		if domainTrade == nil {
+			c.recordDrop(trade.DropNilTrade, symbol, partition)
 			return
 		}
 
@@ -713,9 +710,8 @@ func (c *SDKClient) tradeCallback(symbol string) binancews.Handler {
 		// "parsed - dropped" would not be the number that reached the aggregator. The two
 		// branches are disjoint and their sum is the parsed count.
 		buf := c.buffers.GetOrCreate(symbol)
-		if buf.Append(*trade) {
-			total := c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+		if buf.Append(*domainTrade) {
+			total := c.recordDrop(trade.DropBufferOverflow, symbol, partition)
 			// The counter carries every loss; the log carries the first one, so a sustained
 			// overflow cannot drown the line that says it started.
 			if total == 1 {
@@ -935,7 +931,7 @@ func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
 	handlers := make(map[string]binancews.Handler, len(symbols))
 	for _, symbol := range symbols {
 		c.ledger.Assign(symbol, pid)
-		handlers[streamName(symbol)] = c.tradeCallback(symbol)
+		handlers[streamName(symbol)] = c.tradeCallback(symbol, conn.ID)
 	}
 	if err := connectMarketStream(c.ctx, c.ctx, conn, handlers); err != nil {
 		// The partition is gone and its symbols have no producer. The caller falls back to the
@@ -1454,6 +1450,18 @@ func (c *SDKClient) toDomainTrade(event *tradeEvent) *trade.Trade {
 		Amount:    amount,
 		Side:      side,
 	}
+}
+
+// recordDrop spends one local loss on the legacy aggregate AND on the classified
+// series that carries reason, symbol and the real connection partition. The two
+// counters are advanced together, from the same event, so the legacy aggregate is
+// always the sum of the classified deltas. It returns the new legacy total so the
+// first-overflow log keeps its once-per-buffer semantics.
+func (c *SDKClient) recordDrop(reason trade.DropReason, symbol string, partition int) uint64 {
+	total := c.tradesDropped.Add(1)
+	c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+	c.metrics.incTradesDroppedClassified(venueBinance, marketTypeFuture, symbol, partition, string(reason))
+	return total
 }
 
 // triggerGapRecovery triggers gap recovery for all symbols after a reconnect.
