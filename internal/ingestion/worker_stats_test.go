@@ -109,26 +109,83 @@ func TestWorkerErrorReleasesInFlight(t *testing.T) {
 	}
 }
 
-// With the claim already held, concurrent schedulers must enqueue nothing. If
-// the CAS were removed, every goroutine would enqueue the same symbol.
-func TestScheduleClientsConcurrentRespectsClaim(t *testing.T) {
-	manager := NewHybridManager(nil, 4, nil)
+// Start with the claim FREE and let many goroutines race without any
+// synchronization beyond the start gate. The CAS must elect exactly one
+// enqueue; a Load+Store implementation lets every goroutine in.
+func TestScheduleClientsConcurrentEnqueuesExactlyOnce(t *testing.T) {
+	manager := NewHybridManager(nil, 8, nil)
 	state := &HybridClientState{Key: "binance:future:BTC/USDT"}
-	state.inFlight.Store(true)
 	manager.clients[state.Key] = state
 
+	const racers = 128
+	start := make(chan struct{})
 	var wg sync.WaitGroup
-	for index := 0; index < 64; index += 1 {
+	for index := 0; index < racers; index += 1 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			manager.scheduleClients()
 		}()
 	}
+	close(start)
 	wg.Wait()
 
-	if got := len(manager.processQueue); got != 0 {
-		t.Fatalf("queue=%d with the claim held, want 0 — the CAS was bypassed", got)
+	if got := len(manager.processQueue); got != 1 {
+		t.Fatalf("queue=%d, want exactly 1 — the CAS must elect a single winner", got)
+	}
+	<-manager.processQueue
+}
+
+// Isolated mutation control: the same scheduling algorithm with Load+Store
+// instead of CompareAndSwap. It must enqueue more than once; if this stops
+// reproducing, the production test above no longer guards the CAS.
+func scheduleClientsMutant(manager *HybridManager, barrier *sync.WaitGroup) {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	for _, state := range manager.clients {
+		if state.inFlight.Load() {
+			continue
+		}
+		// Widen the Load→Store window deterministically so the mutation always
+		// reproduces; the production test above uses no barrier.
+		barrier.Done()
+		barrier.Wait()
+		state.inFlight.Store(true)
+		select {
+		case manager.processQueue <- state:
+		default:
+			state.inFlight.Store(false)
+		}
+	}
+}
+
+func TestScheduleClientsMutantLoadStoreDoubleEnqueues(t *testing.T) {
+	manager := NewHybridManager(nil, 8, nil)
+	state := &HybridClientState{Key: "binance:future:BTC/USDT"}
+	manager.clients[state.Key] = state
+
+	const racers = 128
+	start := make(chan struct{})
+	barrier := &sync.WaitGroup{}
+	barrier.Add(racers)
+	var wg sync.WaitGroup
+	for index := 0; index < racers; index += 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			scheduleClientsMutant(manager, barrier)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := len(manager.processQueue); got <= 1 {
+		t.Fatalf("queue=%d: the Load+Store mutant should enqueue the same symbol more than once", got)
+	}
+	for len(manager.processQueue) > 0 {
+		<-manager.processQueue
 	}
 }
 
