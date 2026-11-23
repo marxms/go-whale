@@ -95,8 +95,9 @@ func TestRestartPartitionClosesOnlyTheVictim(t *testing.T) {
 	feed.wsBasePath = wsServerURL(server)
 	defer feed.Stop()
 
-	// Long enough names to exceed the combined-URL budget before the stream-count budget, which is
-	// how production ends up with two uneven partitions.
+	// Enough long-named symbols to produce several partitions under the production budgets. The
+	// scenario needs a victim and at least one sister, not a hardcoded partition count: the count
+	// follows whichever budget (stream count or URL length) binds first.
 	symbols := make([]string, 0, 320)
 	for i := 0; i < 320; i++ {
 		symbols = append(symbols, fmt.Sprintf("TEST%04d/USDT", i))
@@ -106,9 +107,10 @@ func TestRestartPartitionClosesOnlyTheVictim(t *testing.T) {
 	}
 
 	feed.mu.Lock()
-	if len(feed.parts) != 2 {
+	wantParts := len(feed.parts)
+	if wantParts < 2 {
 		feed.mu.Unlock()
-		t.Fatalf("partitions = %d, want 2 (the scenario needs a sister)", len(feed.parts))
+		t.Fatalf("partitions = %d, want at least 2 (the scenario needs a sister)", wantParts)
 	}
 	victim, sister := feed.parts[0], feed.parts[1]
 	victimID := victim.client.ID
@@ -126,8 +128,8 @@ func TestRestartPartitionClosesOnlyTheVictim(t *testing.T) {
 
 	feed.mu.Lock()
 	defer feed.mu.Unlock()
-	if len(feed.parts) != 2 {
-		t.Fatalf("partitions after the scoped restart = %d, want 2", len(feed.parts))
+	if len(feed.parts) != wantParts {
+		t.Fatalf("partitions after the scoped restart = %d, want %d", len(feed.parts), wantParts)
 	}
 	sisterAlive := false
 	for _, p := range feed.parts {

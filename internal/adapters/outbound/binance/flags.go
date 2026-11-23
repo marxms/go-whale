@@ -6,11 +6,15 @@ import (
 )
 
 // Combined-URL partition budget. Binance allows 1024 streams and a
-// bounded URL length per connection; we stay under both so a single handshake
-// never trips a server-side limit.
+// bounded URL length per connection; we stay well under both so one socket
+// failure costs at most one small partition and the handshake stays short.
 const (
 	// maxStreamsPerConnection caps the number of @aggTrade streams placed on one
-	// combined-URL connection. 800 leaves headroom under Binance's 1024 limit.
+	// combined-URL connection. 800 leaves the URL cap to split 500 symbols into
+	// two trade connections. The 100/125-stream experiment on 2026-11-23 raised
+	// the total connection count from 4 to 8-10 and put partition 0 into a
+	// 1-7 s reopen loop (38 closes in 25 min, all 1006); the two-connection
+	// layout plus pinned trade edges is the configuration that held the regime.
 	maxStreamsPerConnection = 800
 
 	// maxKlineStreamsPerConnection caps @kline streams on one connection. It is a SEPARATE
@@ -35,6 +39,22 @@ func wsBaseFromEnv(name, fallback string) string {
 	return fallback
 }
 
+// wsEdgesFromEnv resolves an optional comma-separated list of pinned WS edges
+// (host:port). An empty list keeps the venue's DNS resolution.
+func wsEdgesFromEnv(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	edges := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		if edge := strings.TrimSpace(part); edge != "" {
+			edges = append(edges, edge)
+		}
+	}
+	return edges
+}
+
 // isTestnetWSBase reports whether the configured WebSocket base points at the Binance
 // futures TESTNET cluster.
 //
@@ -57,14 +77,14 @@ func aggTradeStreams(symbols []string) []string {
 	return streams
 }
 
-// streamName converts a single domain symbol to its @trade stream name. The
-// individual-trade stream is used instead of @aggTrade: measured in this region, the
-// official futures host delivered @trade while @aggTrade produced no frames at all. @trade
-// carries every fill, which is a superset of the aggregate trades the aggregator already
-// accepts.
+// streamName converts a single domain symbol to its @aggTrade stream name. The
+// aggregate trade stream is the documented market feed and belongs on /market; the
+// earlier @trade choice came from a probe taken on the wrong route. @aggTrade carries
+// every fill, aggregated per price and side, at a fraction of the frame rate, and its
+// aggregate id is the id the gap ledger was built around.
 func streamName(symbol string) string {
 	binanceSymbol := strings.ToLower(strings.ReplaceAll(symbol, "/", ""))
-	return binanceSymbol + "@trade"
+	return binanceSymbol + "@aggTrade"
 }
 
 // partitionStreams splits the full stream list into per-connection slices, each

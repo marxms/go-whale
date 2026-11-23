@@ -50,6 +50,8 @@ type SDKClient struct {
 	wsConn *binancews.Connection
 	// wsBasePath is resolved once at construction; tests may override it.
 	wsBasePath string
+	// tradeWSEdges pins the trade sockets to known-good edges; empty keeps DNS.
+	tradeWSEdges []string
 	// combinedURLConnectEnabled and livenessLedgerEnabled are client tuning flags. They live
 	// on the client so tests can flip them without mutating process-wide state.
 	combinedURLConnectEnabled bool
@@ -158,6 +160,7 @@ func NewSDKClient(config streaming.ClientConfig, logs ...*slog.Logger) *SDKClien
 		heartbeat:                 &starvationHeartbeat{},
 		symbols:                   make(map[string]bool),
 		wsBasePath:                defaultFuturesWSBasePath(),
+		tradeWSEdges:              wsEdgesFromEnv("GOWHALE_BINANCE_FUTURES_TRADE_WS_EDGES"),
 		combinedURLConnectEnabled: true,
 		livenessLedgerEnabled:     true,
 		netdiag:                   netdiag.New(),
@@ -277,6 +280,7 @@ func (c *SDKClient) connectLocked(ctx context.Context) error {
 	logger.OrDiscard(c.log).Info("binance ws: connecting to market streams")
 	conn := binancews.NewConnection(0, c.wsBasePath,
 		binancews.WithRoute(routeFor(venueBinance, marketTypeFuture, streamClassTrade)),
+		binancews.WithPinnedEdges(c.tradeWSEdges),
 		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)))
 	if err := connectMarketStream(ctx, c.ctx, conn, nil); err != nil {
 		return fmt.Errorf("binance websocket connect failed: %w", err)
@@ -507,6 +511,7 @@ func (c *SDKClient) partitionLikelyLive(pid int) bool {
 func (c *SDKClient) newFuturesWS(id int) *binancews.Connection {
 	return binancews.NewConnection(id, c.wsBasePath,
 		binancews.WithRoute(routeFor(venueBinance, marketTypeFuture, streamClassTrade)),
+		binancews.WithPinnedEdges(c.tradeWSEdges),
 		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)))
 }
 
@@ -663,7 +668,7 @@ func (c *SDKClient) Subscribe(ctx context.Context, symbol string) error {
 		WithSymbol(symbol).
 		Log()
 
-	logger.OrDiscard(c.log).Info("subscribed via sdk", "symbol", symbol, "stream", "@trade")
+	logger.OrDiscard(c.log).Info("subscribed via sdk", "symbol", symbol, "stream", "@aggTrade")
 	return nil
 }
 
@@ -753,14 +758,14 @@ func (c *SDKClient) Unsubscribe(symbol string) error {
 	conn := c.wsConn
 	c.connectMu.Unlock()
 	if conn != nil {
-		_ = conn.Unsubscribe(context.Background(), strings.ToLower(strings.ReplaceAll(symbol, "/", ""))+"@trade")
+		_ = conn.Unsubscribe(context.Background(), streamName(symbol))
 	}
 
 	c.buffers.Remove(symbol)
 	if c.livenessLedgerEnabled {
 		c.ledger.Forget(symbol)
 	}
-	logger.OrDiscard(c.log).Info("unsubscribed", "symbol", symbol, "stream", "@trade")
+	logger.OrDiscard(c.log).Info("unsubscribed", "symbol", symbol, "stream", "@aggTrade")
 	return nil
 }
 

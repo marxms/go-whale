@@ -53,7 +53,7 @@ func TestConnPolicyFieldsRequireDocsURL(t *testing.T) {
 func TestConnPolicyRoutesMatchStreamClass(t *testing.T) {
 	futures, _ := ConnPolicyFor("binance", Future)
 	want := map[string]string{
-		"trade":    "/public",
+		"trade":    "/market",
 		"kline":    "/market",
 		"aggTrade": "/market",
 	}

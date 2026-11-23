@@ -358,7 +358,7 @@ func (c *SpotSDKClient) Subscribe(ctx context.Context, symbol string) error {
 		WithSymbol(symbol).
 		Log()
 
-	logger.OrDiscard(c.log).Info("subscribed via spot sdk", "symbol", symbol, "stream", "@trade")
+	logger.OrDiscard(c.log).Info("subscribed via spot sdk", "symbol", symbol, "stream", "@aggTrade")
 	return nil
 }
 
@@ -433,7 +433,7 @@ func (c *SpotSDKClient) Unsubscribe(symbol string) error {
 	}
 
 	c.buffers.Remove(symbol)
-	logger.OrDiscard(c.log).Info("unsubscribed", "symbol", symbol, "stream", "@trade", "market_type", marketTypeSpot)
+	logger.OrDiscard(c.log).Info("unsubscribed", "symbol", symbol, "stream", "@aggTrade", "market_type", marketTypeSpot)
 	return nil
 }
 

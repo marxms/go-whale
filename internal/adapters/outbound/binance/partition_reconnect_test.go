@@ -30,8 +30,8 @@ func TestReconnectOnePartitionKeepsTheSister(t *testing.T) {
 	c.livenessLedgerEnabled = true
 	t.Cleanup(func() { _ = c.Close() })
 
-	// Long names so the combined URL hits its budget before the stream-count budget: this is how
-	// production ends up with two uneven partitions.
+	// Enough long-named symbols to produce several partitions under the production budgets. The
+	// scenario needs a victim and at least one sister; which budget binds first is irrelevant.
 	symbols := make([]string, 0, 340)
 	for i := 0; i < 340; i++ {
 		symbols = append(symbols, fmt.Sprintf("TEST%04d/USDT", i))
@@ -50,9 +50,10 @@ func TestReconnectOnePartitionKeepsTheSister(t *testing.T) {
 	c.connectMu.Unlock()
 
 	c.connectMu.Lock()
-	if len(c.partitions) != 2 {
+	parts := len(c.partitions)
+	if parts < 2 {
 		c.connectMu.Unlock()
-		t.Fatalf("partitions = %d, want 2 (the scenario needs a sister)", len(c.partitions))
+		t.Fatalf("partitions = %d, want at least 2 (the scenario needs a sister)", parts)
 	}
 	victim, sister := c.partitions[0], c.partitions[1]
 	c.connectMu.Unlock()

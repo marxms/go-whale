@@ -127,9 +127,9 @@ func (h *binanceSourceHarness) deliver(t *testing.T, symbol string, trades ...tr
 		frame, err := json.Marshal(binanceTestTradeFrame{
 			// Combined-stream envelope: the adapter's router keys on `stream`, which is
 			// exactly the name it registered for this symbol.
-			Stream: strings.ToLower(strings.ReplaceAll(symbol, "/", "")) + "@trade",
+			Stream: strings.ToLower(strings.ReplaceAll(symbol, "/", "")) + "@aggTrade",
 			Data: binanceTestTradeEvent{
-				Event:       "trade",
+				Event:       "aggTrade",
 				Symbol:      symbol,
 				AggregateID: id,
 				Price:       strconv.FormatFloat(tr.Price, 'f', -1, 64),

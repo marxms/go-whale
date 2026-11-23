@@ -83,7 +83,7 @@ func ConnPolicyFor(exchangeID string, mt MarketType) (ConnPolicy, bool) {
 			ConnWindow:        5 * time.Minute,
 			PingEncoding:      PingEncodingProtocol,
 			Routes: map[string]string{
-				"trade":     routePublic,
+				"trade":     routeMarket,
 				"aggTrade":  routeMarket,
 				"kline":     routeMarket,
 				"markPrice": routeMarket,

@@ -8,8 +8,8 @@ import (
 
 // streamClass names the documented stream families this adapter dials. The
 // route for each one is declared by the venue policy, not here: Binance USD-M
-// serves kline and aggregate trade on /market and public trade on /public, and
-// a connection without a route silently receives neither.
+// serves kline and aggregate trade on /market and the high-frequency book on
+// /public; a connection without a route silently receives neither.
 const (
 	streamClassTrade = "trade"
 	streamClassKline = "kline"

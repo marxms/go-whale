@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -103,6 +104,12 @@ type Connection struct {
 
 	dialer *websocket.Dialer
 
+	// pinnedEdges are optional host:port endpoints tried before the venue's
+	// DNS. A resolver answer that lands on a flapping edge would otherwise pin
+	// every reconnect to it. Empty means plain DNS.
+	pinnedEdges []string
+	edgeCursor  atomic.Uint64
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -158,6 +165,20 @@ func WithRoute(route string) Option {
 	}
 }
 
+// WithPinnedEdges pins the TCP dial to these host:port endpoints, in rotation,
+// before falling back to the URL host. The TLS SNI and Host header remain the
+// URL's, so the venue's certificate still matches.
+func WithPinnedEdges(edges []string) Option {
+	return func(c *Connection) {
+		c.pinnedEdges = c.pinnedEdges[:0]
+		for _, edge := range edges {
+			if edge = strings.TrimSpace(edge); edge != "" {
+				c.pinnedEdges = append(c.pinnedEdges, edge)
+			}
+		}
+	}
+}
+
 // NewConnection creates one combined-stream connection; Connect dials it and installs handlers.
 func NewConnection(id int, baseURL string, opts ...Option) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -179,6 +200,9 @@ func NewConnection(id int, baseURL string, opts ...Option) *Connection {
 	for _, opt := range opts {
 		opt(conn)
 	}
+	if len(conn.pinnedEdges) > 0 {
+		conn.dialer.NetDialContext = conn.pinnedDialContext
+	}
 	return conn
 }
 
@@ -197,6 +221,46 @@ func closeHandshakeResponse(resp *http.Response) {
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
+}
+
+// pinnedDialContext tries the pinned edges in rotation, then falls back to the
+// URL host. The rotation starts at the connection id so partitions fan out
+// instead of all taking the first edge.
+func (c *Connection) pinnedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	port := "443"
+	if _, parsed, err := net.SplitHostPort(addr); err == nil {
+		port = parsed
+	}
+	edges := c.pinnedEdges
+	if len(edges) == 0 {
+		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+	}
+	start := 0
+	if c.ID != 0 {
+		start = c.ID % len(edges)
+	}
+	offset := int(c.edgeCursor.Add(1) - 1)
+	var lastErr error
+	for i := 0; i < len(edges); i++ {
+		edge := edges[(start+offset+i)%len(edges)]
+		host, edgePort, err := net.SplitHostPort(edge)
+		if err != nil {
+			host, edgePort = edge, port
+		}
+		conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, net.JoinHostPort(host, edgePort))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+	if err == nil {
+		return conn, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, err
 }
 
 // Connect dials a combined-stream URL and installs every handler before the

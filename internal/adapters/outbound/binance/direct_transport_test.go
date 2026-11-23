@@ -53,8 +53,8 @@ func waitFor(t *testing.T, timeout time.Duration, check func() bool) bool {
 }
 
 func aggTradeFrame(symbol string, price, qty string) string {
-	return `{"stream":"` + strings.ToLower(strings.ReplaceAll(symbol, "/", "")) + `@trade","data":` +
-		`{"e":"trade","s":"` + symbol + `","t":42,"p":"` + price + `","q":"` + qty + `","T":1793882096789,"m":false}}`
+	return `{"stream":"` + strings.ToLower(strings.ReplaceAll(symbol, "/", "")) + `@aggTrade","data":` +
+		`{"e":"aggTrade","s":"` + symbol + `","a":42,"p":"` + price + `","q":"` + qty + `","T":1793882096789,"m":false}}`
 }
 
 func TestAggTradeCallbackParsesWirePayload(t *testing.T) {
@@ -205,9 +205,9 @@ func TestAdapterCloseIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestStreamNameUsesIndividualTradeStream(t *testing.T) {
-	if got := streamName("BTC/USDT"); got != "btcusdt@trade" {
-		t.Fatalf("streamName = %q, want btcusdt@trade", got)
+func TestStreamNameUsesAggregateTradeStream(t *testing.T) {
+	if got := streamName("BTC/USDT"); got != "btcusdt@aggTrade" {
+		t.Fatalf("streamName = %q, want btcusdt@aggTrade", got)
 	}
 }
 
