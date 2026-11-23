@@ -1,6 +1,7 @@
 package binancesdk
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -51,6 +52,24 @@ func TestTradeBuffer_Append_HonorsCap(t *testing.T) {
 	}
 	if trades[0].ID != "1" || trades[1].ID != "2" || trades[2].ID != "3" {
 		t.Errorf("unexpected trade IDs: %v", trades)
+	}
+}
+
+func TestTradeBuffer_PreallocIsBoundedButGrowsToCap(t *testing.T) {
+	buf := NewTradeBuffer("SNDKUSDT", 12000)
+	if got := cap(buf.trades); got != tradeInitialPrealloc {
+		t.Fatalf("prealloc=%d, want %d — o cap alto não pode pré-alocar 12000 por símbolo", got, tradeInitialPrealloc)
+	}
+	for index := 0; index < 12000; index++ {
+		if buf.Append(trade.Trade{ID: strconv.Itoa(index)}) {
+			t.Fatalf("append %d was dropped before the cap", index)
+		}
+	}
+	if got := buf.Len(); got != 12000 {
+		t.Fatalf("fill=%d, want 12000", got)
+	}
+	if !buf.Append(trade.Trade{ID: "overflow"}) {
+		t.Fatal("the append past the cap must report a drop")
 	}
 }
 

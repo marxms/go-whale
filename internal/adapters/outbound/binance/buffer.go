@@ -20,9 +20,20 @@ type TradeBuffer struct {
 }
 
 // NewTradeBuffer creates a new buffer for the given symbol and capacity.
+//
+// Only the first tradeInitialPrealloc slots are pre-allocated. The 2026-11-23
+// production tuning raised the cap to 12000 for a gap-recovery burst; allocating
+// the full cap for all 500 symbols pushed the GC headroom into the degraded
+// band. The slice still grows to cap, so the burst guarantee is unchanged.
 func NewTradeBuffer(symbol string, capacity int) *TradeBuffer {
-	return &TradeBuffer{symbol: symbol, cap: capacity, trades: make([]trade.Trade, 0, capacity)}
+	initial := capacity
+	if initial > tradeInitialPrealloc {
+		initial = tradeInitialPrealloc
+	}
+	return &TradeBuffer{symbol: symbol, cap: capacity, trades: make([]trade.Trade, 0, initial)}
 }
+
+const tradeInitialPrealloc = 500
 
 // Append adds a trade and reports whether THIS trade was DROPPED.
 //
