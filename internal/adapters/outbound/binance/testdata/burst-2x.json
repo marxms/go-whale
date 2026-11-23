@@ -1,12 +1,12 @@
 {
-  "source": "gowhale_stream_trades_buffer_fill delta/intervalo real em 2026-11-22T23:36:45Z/23:40:47Z; 2x por TRD-07",
+  "source": "SNDK/USDT gap-recovery burst 2026-11-23T01:44:20Z: max_fill=5000 e 182 BUFFER_OVERFLOW no mesmo dreno, portanto >=5182 trades antes do dreno; 2x do limite inferior por TRD-07; cap ajustado para 12000",
   "exchange": "binance",
   "marketType": "future",
-  "symbol": "BTC/USDT",
-  "partition": 1,
-  "measuredPeakBurstPerSec": 41.97989964375473,
-  "ratePerSec": 83.95979928750945,
+  "symbol": "SNDK/USDT",
+  "partition": 0,
+  "measuredPeakBurstPerSec": 5182,
+  "ratePerSec": 10364,
   "multiplier": 2,
-  "burstTrades": 84,
-  "resolvedCap": 5000
+  "burstTrades": 10364,
+  "resolvedCap": 12000
 }
