@@ -16,3 +16,9 @@ const KlineFeedInterval = "5m"
 // always transport. It is deliberately far above any plausible gap and far below the
 // 5-minute bucket, so a dead partition is caught before it can cost a whole candle.
 const KlineSilenceLimitSeconds = 60
+
+// KlineFaultRedialWindow is how long a terminal transport fault stays actionable for an
+// immediate partition re-dial. The owner tick is 30s, so a fault is caught on the next tick
+// instead of waiting for the 60s silence limit; the window keeps a stale fault from
+// re-triggering a redial after the partition has already been replaced.
+const KlineFaultRedialWindow = 60 // seconds

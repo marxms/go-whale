@@ -64,6 +64,20 @@ type CloseEvidence struct {
 	// SisterLastFrameAge is stamped by the partitioned owner: the age of the freshest sibling
 	// partition's last frame. Zero means no sister (or none observed).
 	SisterLastFrameAge time.Duration
+	// Component names the owner of this socket ("trade", "kline", "spot"). A close is only
+	// attributable when the log says which transport lost it.
+	Component string
+	// RemoteAddr is the peer address the socket was actually dialed to (IP:port), so a close
+	// can be assigned to an edge without a packet capture.
+	RemoteAddr string
+	// LastFrameAge is how long THIS socket had been silent when it ended. It separates a peer
+	// close on a live stream from a half-open socket the read deadline caught.
+	LastFrameAge time.Duration
+	// Pings and PongErrors count venue pings answered and pong writes that failed. A silent
+	// socket with pong errors names the write path; a silent socket with zero pings names the
+	// read path.
+	Pings      int64
+	PongErrors int64
 }
 
 // Handler receives the `data` object of one combined-stream frame. It runs on
@@ -131,6 +145,14 @@ type Connection struct {
 	// streams is the number of streams the connection carried, fixed at Connect.
 	streams atomic.Int32
 
+	// component names the owner of this socket; it is retained in the close evidence.
+	component string
+	// remoteAddr is the peer actually dialed (IP:port), retained at Connect.
+	remoteAddr atomic.Value // string
+	// pings/pongErrors count venue pings and failed pong writes for the close evidence.
+	pings      atomic.Int64
+	pongErrors atomic.Int64
+
 	done  chan struct{}
 	errCh chan error
 	wg    sync.WaitGroup
@@ -150,6 +172,11 @@ type Option func(*Connection)
 // WithReadIdle sets the documented idle read deadline. Zero disables it.
 func WithReadIdle(idle time.Duration) Option {
 	return func(c *Connection) { c.readIdle = idle }
+}
+
+// WithComponent labels the socket's owner so a close is attributable by transport.
+func WithComponent(name string) Option {
+	return func(c *Connection) { c.component = strings.TrimSpace(name) }
 }
 
 // WithRoute selects the venue's stream-class prefix, such as /market for kline
@@ -301,8 +328,10 @@ func (c *Connection) Connect(ctx context.Context, handlers map[string]Handler) e
 	conn.SetReadLimit(readLimit)
 	c.extendReadDeadline(conn)
 	conn.SetPingHandler(func(payload string) error {
+		c.pings.Add(1)
 		c.extendReadDeadline(conn)
 		if err := conn.WriteControl(websocket.PongMessage, []byte(payload), time.Now().Add(writeWait)); err != nil {
+			c.pongErrors.Add(1)
 			return err
 		}
 		return nil
@@ -316,6 +345,9 @@ func (c *Connection) Connect(ctx context.Context, handlers map[string]Handler) e
 	}
 	c.conn = conn
 	c.connected.Store(true)
+	if remote := conn.UnderlyingConn().RemoteAddr(); remote != nil {
+		c.remoteAddr.Store(remote.String())
+	}
 	nowMs := time.Now().UnixMilli()
 	c.lastMessageAt.Store(nowMs)
 	c.dialedAtMs.Store(nowMs)
@@ -592,13 +624,23 @@ func (c *Connection) stopWith(initiator string, err error) {
 		if dialedAt := c.dialedAtMs.Load(); dialedAt > 0 {
 			dialAge = time.Since(time.UnixMilli(dialedAt))
 		}
+		lastFrameAge := time.Duration(0)
+		if last := c.lastMessageAt.Load(); last > 0 {
+			lastFrameAge = time.Since(time.UnixMilli(last))
+		}
+		remoteAddr, _ := c.remoteAddr.Load().(string)
 		c.evidenceMu.Lock()
 		c.evidence = CloseEvidence{
-			Code:      code,
-			Reason:    reason,
-			Initiator: initiator,
-			DialAge:   dialAge,
-			Streams:   int(c.streams.Load()),
+			Code:         code,
+			Reason:       reason,
+			Initiator:    initiator,
+			DialAge:      dialAge,
+			Streams:      int(c.streams.Load()),
+			Component:    c.component,
+			RemoteAddr:   remoteAddr,
+			LastFrameAge: lastFrameAge,
+			Pings:        c.pings.Load(),
+			PongErrors:   c.pongErrors.Load(),
 		}
 		c.evidenceMu.Unlock()
 		c.connected.Store(false)

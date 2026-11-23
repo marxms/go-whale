@@ -75,6 +75,90 @@ func TestSilentPartitionRequiresALiveSister(t *testing.T) {
 	}
 }
 
+// A terminal transport error must be actionable on the next owner tick, not only after the 60 s
+// silence limit. The victim is the partition that faulted and has not delivered since; a fleet
+// where every partition faulted is still the owner's problem, not one partition's.
+func TestFaultedPartitionRequiresADeliveringSister(t *testing.T) {
+	t.Parallel()
+
+	faulted := func(id int, lastFrameAgo, faultAgo time.Duration, symbols ...string) *klinePartition {
+		p := fabricatedPartition(id, lastFrameAgo, symbols...)
+		p.faultedAt.Store(time.Now().Add(-faultAgo).UnixMilli())
+		return p
+	}
+
+	cases := []struct {
+		name     string
+		parts    []*klinePartition
+		wantOK   bool
+		wantID   int
+		wantSyms int
+	}{
+		{
+			name:     "one faulted partition beside a delivering one",
+			parts:    []*klinePartition{faulted(3, 5*time.Second, time.Second, "AAA/USDT", "BBB/USDT"), fabricatedPartition(4, time.Second, "CCC/USDT")},
+			wantOK:   true,
+			wantID:   3,
+			wantSyms: 2,
+		},
+		{
+			name:   "a single faulted partition is a fleet problem",
+			parts:  []*klinePartition{faulted(0, 5*time.Second, time.Second, "AAA/USDT")},
+			wantOK: false,
+		},
+		{
+			name:   "every partition faulted is a fleet problem",
+			parts:  []*klinePartition{faulted(0, 5*time.Second, time.Second, "AAA/USDT"), faulted(1, 7*time.Second, 2*time.Second, "BBB/USDT")},
+			wantOK: false,
+		},
+		{
+			name:   "a stale fault is already handled elsewhere",
+			parts:  []*klinePartition{faulted(0, 5*time.Minute, 2*time.Minute, "AAA/USDT"), fabricatedPartition(1, time.Second, "BBB/USDT")},
+			wantOK: false,
+		},
+		{
+			name:   "a frame after the fault heals it",
+			parts:  []*klinePartition{faulted(0, time.Second, 5*time.Second, "AAA/USDT"), fabricatedPartition(1, time.Second, "BBB/USDT")},
+			wantOK: false,
+		},
+		{
+			name:   "nothing faulted",
+			parts:  []*klinePartition{fabricatedPartition(0, time.Second, "AAA/USDT"), fabricatedPartition(1, time.Second, "BBB/USDT")},
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			feed := &KlineFeed{parts: tc.parts}
+			stat, members, ok := feed.FaultedPartition(60)
+			if ok != tc.wantOK {
+				t.Fatalf("found = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if stat.ID != tc.wantID || len(members) != tc.wantSyms {
+				t.Fatalf("partition %d with %d members, want %d with %d", stat.ID, len(members), tc.wantID, tc.wantSyms)
+			}
+		})
+	}
+}
+
+func TestNoteFrameClearsTheFault(t *testing.T) {
+	feed := &KlineFeed{}
+	p := fabricatedPartition(1, time.Second, "AAA/USDT")
+	p.faults.Store(2)
+	p.faultedAt.Store(time.Now().UnixMilli())
+
+	feed.noteFrame(p)
+
+	if p.faults.Load() != 0 || p.faultedAt.Load() != 0 {
+		t.Fatalf("faults=%d faultedAt=%d, want both cleared by a delivered frame", p.faults.Load(), p.faultedAt.Load())
+	}
+}
+
 // Regression: one partition's fault closed the healthy sister, resetting its counters and marking
 // its symbols. A scoped restart must leave the sister's connection untouched.
 func TestRestartPartitionClosesOnlyTheVictim(t *testing.T) {

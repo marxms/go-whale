@@ -143,6 +143,9 @@ type klinePartition struct {
 	// healthy sister's frames reset it every few milliseconds, so a partition retrying forever was
 	// invisible: the restart verdict could only ever describe the fleet.
 	faults atomic.Int32
+	// faultedAt is when THIS partition's newest terminal transport error was observed (ms UTC).
+	// A frame after the fault clears it: the transport proved it recovered.
+	faultedAt atomic.Int64
 
 	// lastClose is the evidence of the newest terminal event, retained for /health. It is written
 	// once per connection lifetime, after the watcher classifies the cause.
@@ -328,6 +331,7 @@ func (f *KlineFeed) NeedsRestart() bool {
 // deliver, so an earlier failure must not accumulate toward a restart.
 func (f *KlineFeed) noteFrame(p *klinePartition) {
 	p.faults.Store(0)
+	p.faultedAt.Store(0)
 	f.framed.Store(true)
 }
 
@@ -536,6 +540,55 @@ func (f *KlineFeed) SilentPartition(limitSeconds float64) (PartitionStat, []stri
 		LastCloseStreams:   evidence.streams,
 		LastCloseSisterAge: evidence.sisterAge,
 	}, append([]string(nil), worst.members...), true
+}
+
+// FaultedPartition reports the ONE partition whose transport ended within maxAgeSeconds and has
+// not delivered a frame since, while at least one sister has not faulted. Unlike the silence
+// watchdog, this reacts to the terminal event itself: the re-dial happens on the next owner tick
+// instead of waiting out the 60 s silence limit.
+//
+// Every partition faulted, or no delivering sister, is a fleet problem: the owner's fleet restart
+// handles it, and restarting one partition would leave the rest without a producer.
+func (f *KlineFeed) FaultedPartition(maxAgeSeconds float64) (PartitionStat, []string, bool) {
+	f.mu.Lock()
+	parts := append([]*klinePartition(nil), f.parts...)
+	f.mu.Unlock()
+	if len(parts) < 2 {
+		return PartitionStat{}, nil, false
+	}
+	now := time.Now().UnixMilli()
+	maxAgeMs := int64(maxAgeSeconds * 1000)
+	var victim *klinePartition
+	delivering := 0
+	for _, p := range parts {
+		faulted := p.faultedAt.Load()
+		if faulted > 0 && now-faulted <= maxAgeMs && p.lastFrameAt.Load() < faulted {
+			if victim == nil || faulted < victim.faultedAt.Load() {
+				victim = p
+			}
+			continue
+		}
+		delivering++
+	}
+	if victim == nil || delivering == 0 {
+		return PartitionStat{}, nil, false
+	}
+	evidence := victim.closeEvidence()
+	return PartitionStat{
+		ID:                 victim.client.ID,
+		Symbols:            victim.symbols,
+		Frames:             victim.frames.Load(),
+		LastFrameAge:       time.Duration(now-victim.lastFrameAt.Load()) * time.Millisecond,
+		Reconnects:         victim.reconnects.Load(),
+		Restores:           victim.restores.Load(),
+		LastCloseAtMs:      victim.lastCloseAt.Load(),
+		SilentSymbols:      victim.symbols,
+		LastCloseCode:      evidence.code,
+		LastCloseCause:     evidence.cause,
+		LastCloseDialAge:   evidence.dialAge,
+		LastCloseStreams:   evidence.streams,
+		LastCloseSisterAge: evidence.sisterAge,
+	}, append([]string(nil), victim.members...), true
 }
 
 // RestartPartition closes ONE partition and re-dials only its members.
@@ -761,7 +814,8 @@ func (f *KlineFeed) dial(symbols []string, preferredID int) ([]*klinePartition, 
 		ctx, cancel := context.WithCancel(f.ctx)
 		ws := binancews.NewConnection(id, f.wsBasePath,
 			binancews.WithRoute(routeFor(f.exchange, f.marketType, streamClassKline)),
-			binancews.WithReadIdle(readIdleFor(f.exchange, f.marketType)))
+			binancews.WithReadIdle(readIdleFor(f.exchange, f.marketType)),
+			binancews.WithComponent("kline"))
 		part := symbols[off : off+len(slice)]
 		off += len(part)
 
@@ -811,7 +865,10 @@ func (f *KlineFeed) dial(symbols []string, preferredID int) ([]*klinePartition, 
 			defer conn.wg.Done()
 			watchTransportError(
 				conn.ctx, partitionID, ws, f.marketType, f.metrics, f.netdiag,
-				func(string) { conn.faults.Add(1) }, f.log,
+				func(string) {
+					conn.faults.Add(1)
+					conn.faultedAt.Store(time.Now().UnixMilli())
+				}, f.log,
 				// The sibling's age is measured HERE, not in the transport: only the feed knows
 				// which connection is the victim and which one is still delivering.
 				func() time.Duration { return f.freshestSisterAge(conn) },

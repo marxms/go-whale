@@ -285,10 +285,19 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	}
 	silent, havePartitions := feed.SecondsSinceLastFrame()
 	restartNeeded := feed.NeedsRestart()
+	// A terminal transport fault names its partition immediately. Reading it before the healthy
+	// early-return is what lets the re-dial happen on the next 30s tick instead of waiting out
+	// the 60s silence limit, without touching a delivering sister.
+	var faultStat binancesdk.PartitionStat
+	var faultMembers []string
+	faulted := false
+	if faultedFeed, ok := feed.(faultedKlineFeed); ok && len(a.klinePendingAttach) == 0 {
+		faultStat, faultMembers, faulted = faultedFeed.FaultedPartition(binancesdk.KlineFaultRedialWindow)
+	}
 	if len(a.klineSymbols) == 0 && len(a.klinePendingAttach) == 0 && !restartNeeded {
 		return false
 	}
-	if havePartitions && silent < binancesdk.KlineSilenceLimitSeconds && !restartNeeded && len(a.klinePendingAttach) == 0 {
+	if havePartitions && silent < binancesdk.KlineSilenceLimitSeconds && !restartNeeded && !faulted && len(a.klinePendingAttach) == 0 {
 		a.noteKlineHealthy()
 		return false
 	}
@@ -319,8 +328,11 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	// fault is the partition's, and restarting the fleet would close the healthy sister and mark
 	// symbols that never lost their producer.
 	if scoped, ok := feed.(partitionScopedKlineFeed); ok && !restartNeeded && len(a.klinePendingAttach) == 0 {
+		if faulted {
+			return a.restartKlinePartition(ctx, exchangeID, marketType, scoped, faultStat, faultMembers, "transport fault")
+		}
 		if stat, members, found := scoped.SilentPartition(binancesdk.KlineSilenceLimitSeconds); found {
-			return a.restartKlinePartition(ctx, exchangeID, marketType, scoped, stat, members)
+			return a.restartKlinePartition(ctx, exchangeID, marketType, scoped, stat, members, "silence")
 		}
 	}
 	switch {
@@ -404,6 +416,12 @@ type partitionScopedKlineFeed interface {
 	RestartPartition(int) error
 }
 
+// faultedKlineFeed is the optional capability for reacting to a terminal transport error. It is
+// separate so an older fake remains a valid partition-scoped feed.
+type faultedKlineFeed interface {
+	FaultedPartition(float64) (binancesdk.PartitionStat, []string, bool)
+}
+
 // restartKlinePartition heals one silent partition without touching the fleet. The mark is scoped
 // to that partition's members: they are the only symbols whose producer disappeared.
 func (a *App) restartKlinePartition(
@@ -412,11 +430,13 @@ func (a *App) restartKlinePartition(
 	scoped partitionScopedKlineFeed,
 	stat binancesdk.PartitionStat,
 	members []string,
+	cause string,
 ) bool {
 	a.logger().Error("kline feed: one partition is not delivering; restarting ONLY that partition",
 		"partition", stat.ID,
 		"symbols", len(members),
 		"silent_seconds", stat.LastFrameAge.Seconds(),
+		"cause", cause,
 		"exchange", exchangeID,
 		"market_type", marketType)
 

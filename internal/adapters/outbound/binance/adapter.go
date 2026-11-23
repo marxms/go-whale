@@ -281,7 +281,8 @@ func (c *SDKClient) connectLocked(ctx context.Context) error {
 	conn := binancews.NewConnection(0, c.wsBasePath,
 		binancews.WithRoute(routeFor(venueBinance, marketTypeFuture, streamClassTrade)),
 		binancews.WithPinnedEdges(c.tradeWSEdges),
-		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)))
+		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)),
+		binancews.WithComponent("trade"))
 	if err := connectMarketStream(ctx, c.ctx, conn, nil); err != nil {
 		return fmt.Errorf("binance websocket connect failed: %w", err)
 	}
@@ -512,7 +513,8 @@ func (c *SDKClient) newFuturesWS(id int) *binancews.Connection {
 	return binancews.NewConnection(id, c.wsBasePath,
 		binancews.WithRoute(routeFor(venueBinance, marketTypeFuture, streamClassTrade)),
 		binancews.WithPinnedEdges(c.tradeWSEdges),
-		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)))
+		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)),
+		binancews.WithComponent("trade"))
 }
 
 // connectAndResubscribeCombined performs the combined-URL reconnect: it (re)builds one SDK

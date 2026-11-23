@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,41 @@ func TestCloseEvidenceCarriesDialAgeAndStreams(t *testing.T) {
 	}
 	if evidence.SisterLastFrameAge != 1500*time.Millisecond {
 		t.Fatalf("sister age = %v, want the owner-stamped value", evidence.SisterLastFrameAge)
+	}
+}
+
+// A 1006 can only be assigned to an edge/transport when the evidence says which component
+// owned the socket, which peer it actually reached and how the ping path behaved.
+func TestCloseEvidenceCarriesComponentRemoteAndPings(t *testing.T) {
+	server := newWSServer(t, func(conn *websocket.Conn, _ *http.Request) {
+		_ = conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(time.Second))
+		<-time.After(2 * time.Second)
+	})
+
+	c := NewConnection(11, wsURL(server), WithComponent("trade"))
+	if err := c.Connect(context.Background(), map[string]Handler{}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.pings.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ev := c.CloseEvidence()
+	if ev.Component != "trade" {
+		t.Fatalf("component = %q, want trade: a close must name its transport", ev.Component)
+	}
+	if ev.RemoteAddr == "" || !strings.Contains(ev.RemoteAddr, ":") {
+		t.Fatalf("remote addr = %q, want the peer actually dialed", ev.RemoteAddr)
+	}
+	if ev.Pings == 0 {
+		t.Fatal("pings = 0, want the venue ping counted")
+	}
+	if ev.PongErrors != 0 {
+		t.Fatalf("pong errors = %d, want 0 on a healthy pong write", ev.PongErrors)
 	}
 }
 

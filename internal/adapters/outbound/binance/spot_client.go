@@ -204,7 +204,7 @@ func (c *SpotSDKClient) connectLocked(ctx context.Context) error {
 	c.connWg.Wait()
 
 	logger.OrDiscard(c.log).Info("binance spot ws: connecting to market streams")
-	conn := binancews.NewConnection(0, c.wsBasePath, binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeSpot)))
+	conn := binancews.NewConnection(0, c.wsBasePath, binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeSpot)), binancews.WithComponent("spot"))
 	if err := connectMarketStream(ctx, c.ctx, conn, nil); err != nil {
 		return fmt.Errorf("binance spot websocket connect failed: %w", err)
 	}
@@ -268,7 +268,7 @@ func (c *SpotSDKClient) sortedSubscribedSymbols() []string {
 }
 
 func (c *SpotSDKClient) newSpotWS(id int) *binancews.Connection {
-	return binancews.NewConnection(id, c.wsBasePath, binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeSpot)))
+	return binancews.NewConnection(id, c.wsBasePath, binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeSpot)), binancews.WithComponent("spot"))
 }
 
 // connectAndResubscribeCombined performs the combined-URL reconnect for spot.

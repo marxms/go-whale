@@ -110,6 +110,7 @@ func recordTransportError(
 	}
 	logger.OrDiscard(log).Warn("binance ws: partition socket error; triggering immediate reconnect",
 		"market_type", market,
+		"component", evidence.Component,
 		"partition", partitionID,
 		"cause", cause,
 		"close_code", evidence.Code,
@@ -117,6 +118,10 @@ func recordTransportError(
 		"close_initiator", evidence.Initiator,
 		"dial_age_ms", evidence.DialAge.Milliseconds(),
 		"streams", evidence.Streams,
+		"remote_addr", evidence.RemoteAddr,
+		"last_frame_age_ms", evidence.LastFrameAge.Milliseconds(),
+		"pings", evidence.Pings,
+		"pong_errors", evidence.PongErrors,
 		"sister_last_frame_age_ms", evidence.SisterLastFrameAge.Milliseconds(),
 		"scope", scope,
 		"error", err)
