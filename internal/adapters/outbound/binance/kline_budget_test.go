@@ -41,7 +41,7 @@ func TestKlineBudgetIsSeparateFromAggTrade(t *testing.T) {
 	if !strings.Contains(text, "partitionStreamsWithBudget(streams, maxKlineStreamsPerConnection, maxCombinedURLLength)") {
 		t.Fatal("the kline partitioner no longer reads maxKlineStreamsPerConnection")
 	}
-	if !strings.Contains(text, "maxKlineStreamsPerConnection = maxStreamsPerConnection") {
-		t.Fatal("the kline budget must be declared separately, not inline in the aggTrade constant")
+	if !strings.Contains(text, "maxKlineStreamsPerConnection = 200") {
+		t.Fatal("the kline budget must carry the measured 200-stream value, declared separately from the aggTrade constant")
 	}
 }

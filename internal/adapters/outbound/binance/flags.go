@@ -18,11 +18,12 @@ const (
 	maxStreamsPerConnection = 800
 
 	// maxKlineStreamsPerConnection caps @kline streams on one connection. It is a SEPARATE
-	// budget: the 200/250/300 experiment may show that kline tolerates fewer streams than
-	// aggTrade, and the venue's 1024 limit is per connection, not per stream class. Until the
-	// experiment measures a value, it stays equal to the aggTrade budget — promoting an
-	// unmeasured number is the defect this constant exists to prevent.
-	maxKlineStreamsPerConnection = maxStreamsPerConnection
+	// budget because kline and aggTrade do not share the same tolerance. MEASURED 2026-11-24:
+	// the 332-stream kline partition closed at 05:00, 09:01, 09:44 and again after 44 s, while
+	// the 168-stream kline partition and the 332-stream aggTrade partition stayed up — kline
+	// does not tolerate the 332-stream layout. 200 splits 500 symbols into 3 partitions
+	// (~167 each) and bounds the blast radius; the aggTrade layout is unchanged.
+	maxKlineStreamsPerConnection = 200
 
 	// maxCombinedURLLength caps the total characters of the joined stream list
 	// (the "a@aggTrade/b@aggTrade/..." portion). ~6KB is comfortably below the
