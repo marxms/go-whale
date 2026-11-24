@@ -126,6 +126,20 @@ func TestCloseEvidenceCarriesComponentRemoteAndPings(t *testing.T) {
 	}
 }
 
+// Gorilla's default dialer is net.Dial without a timeout. A socket without pinned edges must
+// still bound the TCP connect, or a blackholed edge can hold a feed restart for the kernel's
+// SYN retries (~2 min) — the 2026-11-24 kline watchdog delay.
+func TestConnectionWithoutPinnedEdgesUsesABoundedDialer(t *testing.T) {
+	c := NewConnection(1, "ws://127.0.0.1:1")
+	if c.dialer.NetDialContext == nil {
+		t.Fatal("no pinned edges and no NetDialContext: a dial to a blackholed edge could stall for minutes")
+	}
+	pinned := NewConnection(2, "ws://127.0.0.1:1", WithPinnedEdges([]string{"127.0.0.1:1"}))
+	if pinned.dialer.NetDialContext == nil {
+		t.Fatal("pinned connection lost its dial context")
+	}
+}
+
 // The watcher channel holds ONE error. A second one used to disappear in silence, leaving a
 // reconnect with no cause; the retained copy is what the log and the recovery path read.
 func TestTerminalErrorSurvivesAFullWatcherChannel(t *testing.T) {

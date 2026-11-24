@@ -146,6 +146,22 @@ func TestFaultedPartitionRequiresADeliveringSister(t *testing.T) {
 	}
 }
 
+// The watchdog can be delayed (~90 s measured on 2026-11-24). The production window must still
+// consider a fault actionable at that point; the old 60 s window had already expired and only the
+// slower silence path restarted the partition.
+func TestProductionFaultWindowOutlivesADelayedWatchdog(t *testing.T) {
+	victim := fabricatedPartition(0, 5*time.Minute, "AAA/USDT")
+	victim.faultedAt.Store(time.Now().Add(-2 * time.Minute).UnixMilli())
+	feed := &KlineFeed{parts: []*klinePartition{victim, fabricatedPartition(1, time.Second, "BBB/USDT")}}
+
+	if _, _, ok := feed.FaultedPartition(60); ok {
+		t.Fatal("a 2-minute-old fault must not fit the old 60 s window")
+	}
+	if _, members, ok := feed.FaultedPartition(KlineFaultRedialWindow); !ok || len(members) != 1 {
+		t.Fatalf("a 2-minute-old fault must stay actionable inside the production window; got ok=%v members=%v", ok, members)
+	}
+}
+
 func TestNoteFrameClearsTheFault(t *testing.T) {
 	feed := &KlineFeed{}
 	p := fabricatedPartition(1, time.Second, "AAA/USDT")

@@ -29,6 +29,11 @@ const (
 	readLimit       = 64 * 1024 * 1024
 	handshakeWait   = 45 * time.Second
 	writeWait       = 10 * time.Second
+	// dialWait bounds the TCP connect of a socket without pinned edges. Gorilla's default
+	// dialer is net.Dial with NO timeout, so a blackholed edge can stall the dial for the
+	// kernel's SYN retries (~2 min) — measured 2026-11-24: the kline watchdog was delayed
+	// 89 s behind a dial like this. The pinned path already bounds each edge.
+	dialWait = 10 * time.Second
 )
 
 const defaultRenewalInterval = 23 * time.Hour
@@ -229,6 +234,11 @@ func NewConnection(id int, baseURL string, opts ...Option) *Connection {
 	}
 	if len(conn.pinnedEdges) > 0 {
 		conn.dialer.NetDialContext = conn.pinnedDialContext
+	} else {
+		conn.dialer.NetDialContext = (&net.Dialer{
+			Timeout:   dialWait,
+			KeepAlive: 15 * time.Second,
+		}).DialContext
 	}
 	return conn
 }
