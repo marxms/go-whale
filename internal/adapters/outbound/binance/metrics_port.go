@@ -13,6 +13,7 @@ type Metrics struct {
 	HealthState                   func(exchange, marketType string, state float64)
 	MessagesInTotal               func(exchange, marketType string)
 	TradesDroppedTotal            func(exchange, marketType string)
+	TradesDroppedClassified       func(exchange, marketType, symbol string, partition int, reason string)
 	TradesIngestedTotal           func(exchange, marketType string)
 	ReconnectSignalsDropped       func(exchange, marketType string)
 	ResubscribeIncompleteTotal    func(exchange, marketType string, n float64)
@@ -105,6 +106,12 @@ func (m Metrics) incMessagesIn(exchange, marketType string) {
 func (m Metrics) incTradesDropped(exchange, marketType string) {
 	if m.TradesDroppedTotal != nil {
 		m.TradesDroppedTotal(exchange, marketType)
+	}
+}
+
+func (m Metrics) incTradesDroppedClassified(exchange, marketType, symbol string, partition int, reason string) {
+	if m.TradesDroppedClassified != nil {
+		m.TradesDroppedClassified(exchange, marketType, symbol, partition, reason)
 	}
 }
 

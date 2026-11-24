@@ -20,6 +20,7 @@ import (
 const (
 	responseKeyStatus = "status"
 	responseKeyError  = "error"
+	responseKeyCode   = "code"
 )
 
 // errMsgSymbolRequired is the bad-request message for a missing symbol on every
@@ -130,7 +131,7 @@ func (h *Handler) getTimeseriesWithParams(w http.ResponseWriter, r *http.Request
 		// end — the requirement asks for the code "in the analyzer and in the streamer".
 		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{
 			responseKeyError: "unsupported timeframe",
-			"code":           "invalid_timeframe",
+			responseKeyCode:  "invalid_timeframe",
 		})
 		return
 	}
@@ -312,6 +313,7 @@ func (h *Handler) toCandleDTO(items []candle.Candle) []CandleDTO {
 			SideUnknownCount: c.SideUnknownCount,
 			LateTradeCount:   c.LateTradeCount,
 			HasGap:           c.HasGap,
+			GapCause:         c.GapCauseName(),
 		})
 	}
 	return out
@@ -320,7 +322,95 @@ func (h *Handler) toCandleDTO(items []candle.Candle) []CandleDTO {
 // ── Batch API ──────────────────────────────────────────────────────────
 
 // GetBatchPrices returns latest close price + 24h volume for multiple symbols.
-// GET /api/batch/prices?exchange=binance&marketType=future&timeframe=30m&symbols=BTC/USDT,ETH/USDT
+// Batch timeseries limits. One call replaces N per-symbol calls, so the ceiling is per REQUEST, not
+// per symbol: a caller that asks for more than this should page.
+const (
+	batchTimeseriesDefaultLimit = 500
+	batchTimeseriesMaxLimit     = 1000
+	batchTimeseriesMaxSymbols   = 1000
+	// The amplification is the PRODUCT, not either factor: 1000 symbols x 1000 candles is a
+	// million members materialized in one unauthenticated request. The ceiling is per request;
+	// a caller that needs more pages.
+	batchTimeseriesMaxCandles = 10_000
+)
+
+// GetBatchTimeseries serves GET /api/batch/timeseries?exchange=binance&marketType=future&timeframe=5m&limit=500&symbols=BTC/USDT,ETH/USDT
+//
+// The single-symbol route costs one round trip per symbol. This one performs the same read for
+// many symbols at one timeframe, issued as a single pipeline.
+func (h *Handler) GetBatchTimeseries(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	exchange := query.Get("exchange")
+	if exchange == "" {
+		exchange = h.defaultExchange
+	}
+	marketType := query.Get("marketType")
+	if marketType == "" {
+		marketType = h.defaultMarketType
+	}
+	timeframe := query.Get("timeframe")
+	if timeframe == "" {
+		if h.tfReg == nil {
+			writeJSON(h.log, w, http.StatusBadRequest, map[string]string{responseKeyError: "timeframe is required"})
+			return
+		}
+		timeframe = h.tfReg.Default()
+	}
+	if h.tfReg != nil && !h.tfReg.IsSupported(timeframe) {
+		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{
+			responseKeyError: "unsupported timeframe",
+			responseKeyCode:  "invalid_timeframe",
+		})
+		return
+	}
+
+	limit := batchTimeseriesDefaultLimit
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > batchTimeseriesMaxLimit {
+			writeJSON(h.log, w, http.StatusBadRequest, map[string]string{responseKeyError: "invalid limit"})
+			return
+		}
+		limit = parsed
+	}
+
+	symbols := make([]string, 0, 16)
+	for _, raw := range strings.Split(query.Get("symbols"), ",") {
+		if symbol := strings.TrimSpace(raw); symbol != "" {
+			symbols = append(symbols, symbol)
+		}
+	}
+	if len(symbols) == 0 {
+		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{responseKeyError: "symbols is required"})
+		return
+	}
+	if len(symbols) > batchTimeseriesMaxSymbols {
+		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{responseKeyError: "too many symbols"})
+		return
+	}
+	if len(symbols)*limit > batchTimeseriesMaxCandles {
+		writeJSON(h.log, w, http.StatusBadRequest, map[string]string{
+			responseKeyError: "batch too large",
+			responseKeyCode:  "batch_too_large",
+		})
+		return
+	}
+
+	reqs := make([]candle.CandleReq, 0, len(symbols))
+	for _, symbol := range symbols {
+		reqs = append(reqs, candle.CandleReq{Symbol: symbol, Timeframe: timeframe, Limit: limit})
+	}
+	results := h.batchCandles.GetBatchCandlesDesc(r.Context(), exchange, marketType, reqs)
+
+	data := make(map[string][]CandleDTO, len(symbols))
+	for _, symbol := range symbols {
+		data[symbol] = h.toCandleDTO(results[candle.CandleReq{Symbol: symbol, Timeframe: timeframe, Limit: limit}])
+	}
+	writeJSON(h.log, w, http.StatusOK, map[string]any{"data": data, "timeframe": timeframe})
+}
+
+// GetBatchPrices serves GET /api/batch/prices?exchange=binance&marketType=future&timeframe=30m&symbols=BTC/USDT,ETH/USDT
+//
 // If symbols is omitted, returns data for all active symbols.
 func (h *Handler) GetBatchPrices(w http.ResponseWriter, r *http.Request) {
 	exchange := r.URL.Query().Get("exchange")

@@ -15,8 +15,11 @@ import (
 // label. The categories split a reconnect's proximate cause across the layers the
 // SRE troubleshooting needs:
 //
-//   - close_<code>: the server sent a WebSocket close frame (Binance-side). 1006
-//     (abnormal closure) is what Binance uses for un-announced recycling/load-shed.
+//   - close_<code>: the server sent a WebSocket close frame carrying that code.
+//   - transport_unattributed: 1006. RFC 6455 §7.4.1 reserves it and it is never
+//     sent on the wire: the local stack generates it when the connection closed
+//     without a close frame. Treating it as an exchange fault asserts a cause the
+//     venue never stated.
 //   - tcp_reset / eof / io_timeout: kernel/transport drops — an RST from the peer,
 //     a truncated stream, or a dial/read timeout (a timeout often co-occurs across
 //     exchanges, i.e. a local-network event; the cross-exchange correlator labels
@@ -34,6 +37,12 @@ func classifyDisconnect(err error) string {
 	// A WebSocket close frame carries the most specific signal — check it first.
 	var closeErr *websocket.CloseError
 	if errors.As(err, &closeErr) {
+		// 1006 is never received on the wire; the local stack fabricates it when NO close
+		// frame arrived. Naming it close_1006 would claim the venue closed with a code it
+		// cannot send, so the honest label is the absence of attribution.
+		if closeErr.Code == websocket.CloseAbnormalClosure {
+			return "transport_unattributed"
+		}
 		return "close_" + strconv.Itoa(closeErr.Code)
 	}
 	// Kernel/transport sentinels (traverse wrapped *net.OpError/*os.SyscallError).

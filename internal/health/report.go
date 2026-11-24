@@ -53,6 +53,30 @@ type ConnectionSummary struct {
 	Symbols    int
 }
 
+// PartitionHealth is one live feed partition as /health publishes it. It is the row an
+// operator reads to tell a silent partition from a dead fleet without opening sockets.
+type PartitionHealth struct {
+	ID             int   `json:"id"`
+	Symbols        int   `json:"symbols"`
+	Frames         int64 `json:"frames"`
+	LastFrameAgeMs int64 `json:"last_frame_age_ms"`
+	// SilentSymbols is the count of symbols with no producer on this partition.
+	SilentSymbols int   `json:"silent_symbols"`
+	Reconnects    int64 `json:"reconnects"`
+	Restores      int64 `json:"restores"`
+	// LastCloseAtMs is when the newest CLOSED kline frame was received on this partition;
+	// zero when no close has arrived since the connection opened.
+	LastCloseAtMs int64 `json:"last_close_at_ms"`
+	// Evidence of the newest terminal event: the code the venue sent (zero when no frame
+	// arrived), the classified cause, the age of the socket at close, the streams it carried
+	// and the age of the freshest sister's last frame.
+	LastCloseCode        int    `json:"last_close_code"`
+	LastCloseCause       string `json:"last_close_cause"`
+	LastCloseDialAgeMs   int64  `json:"last_close_dial_age_ms"`
+	LastCloseStreams     int    `json:"last_close_streams"`
+	LastCloseSisterAgeMs int64  `json:"last_close_sister_age_ms"`
+}
+
 // ComponentState is the per-component verdict. "absent" means the component is not
 // mounted or not configured; it is never a passed check.
 type ComponentState string
@@ -69,15 +93,16 @@ const (
 // Component names and top-level status strings published by /health. They are the wire
 // contract consumed by probes and dashboards, so the aggregation spells them once.
 const (
-	componentConnections       = "connections"
-	componentExpectedScopes    = "expected_scopes"
-	componentFleetLiveness     = "fleet_liveness"
-	componentFeedProducer      = "feed_producer"
-	componentCoverage          = "coverage"
-	componentColdWrite         = "cold_write"
-	componentGCHeadroom        = "gc_headroom"
-	componentDerivativesPoller = "derivatives_poller"
-	componentTimeframeChecksum = "timeframe_checksum"
+	componentConnections        = "connections"
+	componentExpectedScopes     = "expected_scopes"
+	componentFleetLiveness      = "fleet_liveness"
+	componentFeedProducer       = "feed_producer"
+	componentCoverage           = "coverage"
+	componentColdWrite          = "cold_write"
+	componentGCHeadroom         = "gc_headroom"
+	componentDerivativesPoller  = "derivatives_poller"
+	componentTimeframeChecksum  = "timeframe_checksum"
+	componentTimeframeFreshness = "timeframe_freshness"
 
 	statusHealthy   = "healthy"
 	statusUnhealthy = "unhealthy"
@@ -114,6 +139,17 @@ type FeedProducerReport struct {
 	HaveFeed      bool
 }
 
+// SilentPartitionReport names a partition whose silent symbols exceed the declared fraction
+// of the monitored fleet while at least one sister is fresh. The verdict is unhealthy: those
+// symbols have no producer, and the partition id is what an operator restarts.
+type SilentPartitionReport struct {
+	PartitionID    int    `json:"partition_id"`
+	Scope          string `json:"scope"`
+	Symbols        int    `json:"symbols"`
+	SilentSymbols  int    `json:"silent_symbols"`
+	LastFrameAgeMs int64  `json:"last_frame_age_ms"`
+}
+
 // CandleFreshnessReport is the wire detail published under candle_freshness. Stale counts
 // symbols, not the age of the newest one: a single leading symbol must not mask a frozen
 // fleet. FreshestAgoMs is operational detail, never the only signal.
@@ -123,6 +159,28 @@ type CandleFreshnessReport struct {
 	Stale         int     `json:"stale"`
 	StaleFraction float64 `json:"stale_fraction"`
 	FreshestAgoMs int64   `json:"freshest_ago_ms"`
+}
+
+// TimeframeFreshness is one timeframe's data age, as the producer sees it.
+type TimeframeFreshness struct {
+	Scope        string
+	Timeframe    string
+	NewestAgeMs  int64
+	HaveData     bool
+	StaleAfterMs int64
+}
+
+// TimeframeFreshnessReport is the wire detail published under timeframe_freshness.
+//
+// A frozen derived timeframe is invisible in a per-scope aggregate: the 5m keeps advancing while
+// the 30m stops. This block names each timeframe's age and whether it crossed its freeze threshold.
+type TimeframeFreshnessReport struct {
+	Scope        string `json:"scope"`
+	Timeframe    string `json:"timeframe"`
+	NewestAgoMs  int64  `json:"newest_ago_ms"`
+	HaveData     bool   `json:"have_data"`
+	StaleAfterMs int64  `json:"stale_after_ms"`
+	Stale        bool   `json:"stale"`
 }
 
 // GaugeSink is the output side of the aggregation: the two coverage gauges and the
@@ -142,6 +200,16 @@ type Probes struct {
 	StartedAt func() time.Time
 	// Connections returns the current connection set.
 	Connections func() []Connection
+	// Partitions returns one row per live feed partition. Observational: the verdict over a
+	// silent fraction belongs to fleet liveness, not to this probe.
+	Partitions func() ([]PartitionHealth, bool)
+	// SilentPartitions returns the partitions that exceeded the declared fraction of the
+	// monitored fleet while a sister stayed fresh. A non-empty list makes the process
+	// unhealthy after the startup grace, naming the partition and the silent count.
+	SilentPartitions func() ([]SilentPartitionReport, bool)
+	// FeedReconnectExhausted reports that the bounded redial stopped. A feed with no producer
+	// is unhealthy after the grace: retrying forever was the loop this bound removes.
+	FeedReconnectExhausted func() (bool, bool)
 	// ExpectedScopes returns the canonical scopes that MUST be live after the grace.
 	ExpectedScopes func() ([]string, bool)
 	// LivenessFailing returns scopes whose per-symbol fleet liveness is below threshold.
@@ -153,6 +221,9 @@ type Probes struct {
 	// CandleFreshness returns the per-scope detail behind the fleet-liveness verdict:
 	// newest readable age, monitored symbols and stale symbols.
 	CandleFreshness func() ([]CandleFreshness, bool)
+	// TimeframeFreshness returns, per served timeframe, the age of its newest bucket: the only
+	// probe that sees a derived timeframe freeze while the scope looks live.
+	TimeframeFreshness func() ([]TimeframeFreshness, bool)
 	// ConfiguredCoverage returns the configured symbol count per canonical scope.
 	ConfiguredCoverage func() (map[string]int, bool)
 	// ColdWrite reports the age of the last successful durable-tier commit.
@@ -176,13 +247,18 @@ type Report struct {
 	Uptime     string
 	Goroutines int
 
-	Connections       []ConnectionSummary
-	DerivativesPoller bool
-	TimeframeChecksum string
-	MissingScopes     []string
-	StaleScopes       []string
-	CandleFreshness   []CandleFreshnessReport
-	CoverageDeficits  []string
+	Connections      []ConnectionSummary
+	Partitions       []PartitionHealth
+	SilentPartitions []SilentPartitionReport
+	// FeedReconnectExhausted is true when automatic redial gave up; the scope has no producer.
+	FeedReconnectExhausted bool
+	DerivativesPoller      bool
+	TimeframeChecksum      string
+	MissingScopes          []string
+	StaleScopes            []string
+	CandleFreshness        []CandleFreshnessReport
+	TimeframeFreshness     []TimeframeFreshnessReport
+	CoverageDeficits       []string
 
 	ColdWriteAgeSeconds *int64
 	ColdWriteStale      bool
@@ -333,13 +409,42 @@ func (a *Aggregator) Evaluate() Report {
 			httpStatus = 503
 		}
 	}
+	// A silent partition above the declared fraction is the same verdict as a stale scope: the
+	// symbols it carries have no producer while a sister does. The row names the partition and
+	// the count, so an operator restarts the victim instead of the fleet.
+	var silentPartitions []SilentPartitionReport
+	silentConfigured := false
+	if a.probes.SilentPartitions != nil {
+		silentPartitions, silentConfigured = a.probes.SilentPartitions()
+		if silentConfigured && elapsed > StartupGrace && len(silentPartitions) > 0 {
+			status = statusUnhealthy
+			httpStatus = 503
+		}
+	}
+	reconnectExhausted := false
+	exhaustedConfigured := false
+	if a.probes.FeedReconnectExhausted != nil {
+		reconnectExhausted, exhaustedConfigured = a.probes.FeedReconnectExhausted()
+		if exhaustedConfigured && reconnectExhausted && elapsed > StartupGrace {
+			status = statusUnhealthy
+			httpStatus = 503
+		}
+	}
 	switch {
-	case !livenessConfigured:
+	case !livenessConfigured && !silentConfigured && !exhaustedConfigured:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentAbsent, Reason: reasonNotConfigured})
 	case elapsed <= StartupGrace:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentStarting, Reason: reasonStartupGrace})
+	case reconnectExhausted:
+		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentUnhealthy, Reason: "reconnect exhausted: no automatic redial"})
 	case len(staleScopes) > 0:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentUnhealthy, Reason: fmt.Sprintf("%d stale scope(s)", len(staleScopes))})
+	case len(silentPartitions) > 0:
+		components = append(components, ComponentReport{
+			Name:   componentFleetLiveness,
+			State:  ComponentUnhealthy,
+			Reason: fmt.Sprintf("partition %d silent: %d symbols", silentPartitions[0].PartitionID, silentPartitions[0].SilentSymbols),
+		})
 	default:
 		components = append(components, ComponentReport{Name: componentFleetLiveness, State: ComponentOK})
 	}
@@ -368,6 +473,64 @@ func (a *Aggregator) Evaluate() Report {
 			sort.Slice(candleFreshness, func(i, j int) bool {
 				return candleFreshness[i].Scope < candleFreshness[j].Scope
 			})
+		}
+	}
+
+	// ── Timeframe freshness ───────────────────────────────────────────────
+	//
+	// DEGRADES, never 503. A frozen derived timeframe means the served candles for it are stale,
+	// which is an integrity problem worth alarming on; it does not mean the transport is down, and
+	// restarting the process to fix it would destroy the rings without repairing the fold.
+	var timeframeFreshness []TimeframeFreshnessReport
+	frozenTimeframes := 0
+	noDataTimeframes := 0
+	if a.probes.TimeframeFreshness != nil {
+		rows, configured := a.probes.TimeframeFreshness()
+		if configured {
+			timeframeFreshness = make([]TimeframeFreshnessReport, 0, len(rows))
+			for _, row := range rows {
+				detail := TimeframeFreshnessReport{
+					Scope:        row.Scope,
+					Timeframe:    row.Timeframe,
+					NewestAgoMs:  row.NewestAgeMs,
+					HaveData:     row.HaveData,
+					StaleAfterMs: row.StaleAfterMs,
+				}
+				detail.Stale = row.HaveData && row.StaleAfterMs > 0 && row.NewestAgeMs > row.StaleAfterMs
+				if detail.Stale {
+					frozenTimeframes++
+				}
+				// "Never had data" is not "fresh": after the grace, a configured timeframe that
+				// never produced a bucket is a silent freeze of its own.
+				if !row.HaveData && elapsed > StartupGrace {
+					noDataTimeframes++
+				}
+				timeframeFreshness = append(timeframeFreshness, detail)
+			}
+			sort.Slice(timeframeFreshness, func(i, j int) bool {
+				if timeframeFreshness[i].Scope != timeframeFreshness[j].Scope {
+					return timeframeFreshness[i].Scope < timeframeFreshness[j].Scope
+				}
+				return timeframeFreshness[i].Timeframe < timeframeFreshness[j].Timeframe
+			})
+		}
+	}
+	if timeframeFreshness != nil {
+		if frozenTimeframes > 0 || noDataTimeframes > 0 {
+			reason := fmt.Sprintf("%d frozen timeframe(s)", frozenTimeframes)
+			if noDataTimeframes > 0 {
+				reason = fmt.Sprintf("%s, %d with no data", reason, noDataTimeframes)
+			}
+			components = append(components, ComponentReport{
+				Name:   componentTimeframeFreshness,
+				State:  ComponentDegraded,
+				Reason: reason,
+			})
+			if status == statusHealthy {
+				status = statusDegraded
+			}
+		} else {
+			components = append(components, ComponentReport{Name: componentTimeframeFreshness, State: ComponentOK})
 		}
 	}
 
@@ -514,23 +677,34 @@ func (a *Aggregator) Evaluate() Report {
 		}
 	}
 
+	var partitions []PartitionHealth
+	if a.probes.Partitions != nil {
+		if rows, configured := a.probes.Partitions(); configured {
+			partitions = rows
+		}
+	}
+
 	return Report{
-		Status:              status,
-		HTTPStatus:          httpStatus,
-		Uptime:              now.Sub(start).Round(time.Second).String(),
-		Goroutines:          runtime.NumGoroutine(),
-		Connections:         summaries,
-		DerivativesPoller:   derivPoller,
-		TimeframeChecksum:   checksum,
-		MissingScopes:       missingScopes,
-		StaleScopes:         staleScopes,
-		CandleFreshness:     candleFreshness,
-		CoverageDeficits:    deficits,
-		ColdWriteAgeSeconds: coldAge,
-		ColdWriteStale:      coldStale,
-		GCHeadroomRatio:     gcRatio,
-		GCHeadroomTight:     gcTight,
-		Components:          components,
+		Status:                 status,
+		HTTPStatus:             httpStatus,
+		Uptime:                 now.Sub(start).Round(time.Second).String(),
+		Goroutines:             runtime.NumGoroutine(),
+		Connections:            summaries,
+		Partitions:             partitions,
+		SilentPartitions:       silentPartitions,
+		FeedReconnectExhausted: reconnectExhausted,
+		DerivativesPoller:      derivPoller,
+		TimeframeChecksum:      checksum,
+		MissingScopes:          missingScopes,
+		StaleScopes:            staleScopes,
+		CandleFreshness:        candleFreshness,
+		TimeframeFreshness:     timeframeFreshness,
+		CoverageDeficits:       deficits,
+		ColdWriteAgeSeconds:    coldAge,
+		ColdWriteStale:         coldStale,
+		GCHeadroomRatio:        gcRatio,
+		GCHeadroomTight:        gcTight,
+		Components:             components,
 	}
 }
 

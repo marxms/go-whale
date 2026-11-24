@@ -2,7 +2,7 @@ module github.com/marxms/go-whale
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0

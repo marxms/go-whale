@@ -3,15 +3,28 @@ package binancesdk
 import (
 	"os"
 	"strings"
+	"unicode"
 )
 
 // Combined-URL partition budget. Binance allows 1024 streams and a
-// bounded URL length per connection; we stay under both so a single handshake
-// never trips a server-side limit.
+// bounded URL length per connection; we stay well under both so one socket
+// failure costs at most one small partition and the handshake stays short.
 const (
 	// maxStreamsPerConnection caps the number of @aggTrade streams placed on one
-	// combined-URL connection. 800 leaves headroom under Binance's 1024 limit.
+	// combined-URL connection. 800 leaves the URL cap to split 500 symbols into
+	// two trade connections. The 100/125-stream experiment on 2026-11-23 raised
+	// the total connection count from 4 to 8-10 and put partition 0 into a
+	// 1-7 s reopen loop (38 closes in 25 min, all 1006); the two-connection
+	// layout plus pinned trade edges is the configuration that held the regime.
 	maxStreamsPerConnection = 800
+
+	// maxKlineStreamsPerConnection caps @kline streams on one connection. It is a SEPARATE
+	// budget because kline and aggTrade do not share the same tolerance. MEASURED 2026-11-24:
+	// the 332-stream kline partition closed at 05:00, 09:01, 09:44 and again after 44 s, while
+	// the 168-stream kline partition and the 332-stream aggTrade partition stayed up — kline
+	// does not tolerate the 332-stream layout. 200 splits 500 symbols into 3 partitions
+	// (~167 each) and bounds the blast radius; the aggTrade layout is unchanged.
+	maxKlineStreamsPerConnection = 200
 
 	// maxCombinedURLLength caps the total characters of the joined stream list
 	// (the "a@aggTrade/b@aggTrade/..." portion). ~6KB is comfortably below the
@@ -26,6 +39,22 @@ func wsBaseFromEnv(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// wsEdgesFromEnv resolves an optional comma-separated list of pinned WS edges
+// (host:port). An empty list keeps the venue's DNS resolution.
+func wsEdgesFromEnv(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	edges := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		if edge := strings.TrimSpace(part); edge != "" {
+			edges = append(edges, edge)
+		}
+	}
+	return edges
 }
 
 // isTestnetWSBase reports whether the configured WebSocket base points at the Binance
@@ -50,14 +79,14 @@ func aggTradeStreams(symbols []string) []string {
 	return streams
 }
 
-// streamName converts a single domain symbol to its @trade stream name. The
-// individual-trade stream is used instead of @aggTrade: measured in this region, the
-// official futures host delivered @trade while @aggTrade produced no frames at all. @trade
-// carries every fill, which is a superset of the aggregate trades the aggregator already
-// accepts.
+// streamName converts a single domain symbol to its @aggTrade stream name. The
+// aggregate trade stream is the documented market feed and belongs on /market; the
+// earlier @trade choice came from a probe taken on the wrong route. @aggTrade carries
+// every fill, aggregated per price and side, at a fraction of the frame rate, and its
+// aggregate id is the id the gap ledger was built around.
 func streamName(symbol string) string {
 	binanceSymbol := strings.ToLower(strings.ReplaceAll(symbol, "/", ""))
-	return binanceSymbol + "@trade"
+	return binanceSymbol + "@aggTrade"
 }
 
 // partitionStreams splits the full stream list into per-connection slices, each
@@ -65,7 +94,39 @@ func streamName(symbol string) string {
 // stream lands in exactly one partition; ordering is preserved. The result is
 // never empty when streams is non-empty.
 func partitionStreams(streams []string) [][]string {
-	return partitionStreamsWithBudget(streams, maxStreamsPerConnection, maxCombinedURLLength)
+	return partitionRiskyFirst(streams, maxStreamsPerConnection)
+}
+
+// partitionKlineStreams is the kline feed's partitioner. It reads the kline budget, so the
+// experiment can change one value without touching the aggTrade path (or the reverse).
+func partitionKlineStreams(streams []string) [][]string {
+	return partitionRiskyFirst(streams, maxKlineStreamsPerConnection)
+}
+
+// isRiskyStream reports whether the stream name carries characters outside ASCII. The
+// venue's stream parser is not uniform across its edges for such names: measured on
+// 2026-11-24, the trade partition carrying 币安人生USDT entered a reconnect flap (25+ remote
+// 1006s in 35 min) that no ASCII-only partition showed.
+func isRiskyStream(stream string) bool {
+	return strings.IndexFunc(stream, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
+}
+
+// partitionRiskyFirst isolates non-ASCII stream names on their own connection(s) before
+// the safe streams are partitioned. A venue edge that rejects such a name then costs a
+// handful of symbols instead of a full 200-332-stream partition. The count and URL budget
+// still apply inside each class, and every stream lands in exactly one partition.
+func partitionRiskyFirst(streams []string, maxStreams int) [][]string {
+	risky := make([]string, 0, 8)
+	safe := make([]string, 0, len(streams))
+	for _, stream := range streams {
+		if isRiskyStream(stream) {
+			risky = append(risky, stream)
+		} else {
+			safe = append(safe, stream)
+		}
+	}
+	parts := partitionStreamsWithBudget(risky, maxStreams, maxCombinedURLLength)
+	return append(parts, partitionStreamsWithBudget(safe, maxStreams, maxCombinedURLLength)...)
 }
 
 // partitionStreamsWithBudget is partitionStreams with explicit budgets, so tests can exercise

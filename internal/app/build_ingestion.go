@@ -42,12 +42,14 @@ func (a *App) buildIngestion(cfg config.Config, tfReg *candle.TimeframeRegistry)
 	binanceFactory.SetMetrics(a.binanceMetrics)
 	binanceFactory.SetNetdiag(a.netdiagCorrelator)
 	bingxFactory := bingx.NewClientFactory(a.log)
+	bingxFactory.SetMetrics(a.bingxMetrics)
 	bingxFactory.SetNetdiag(a.netdiagCorrelator)
 	a.manager = ingestion.NewHybridManager(a.handler, ingestion.DefaultManagerWorkers, map[string]streaming.ClientFactory{
 		market.Binance.String(): binanceFactory.For,
 		market.BingX.String():   bingxFactory.For,
 	}, a.log)
 	a.manager.SetTradeBufferSize(cfg.TradeBufferSize)
+	a.manager.SetMetrics(a.ingestionMetrics)
 
 	// Configure route-specific limits.
 	for _, exCfg := range cfg.Exchanges {

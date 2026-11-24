@@ -82,6 +82,19 @@ func (a *App) shutdown(ctx context.Context) error {
 				"pending", pending, "evicted_scopes", evicted)
 		}
 	}
+	if a.hotWriter != nil {
+		stopCtx, cancel := context.WithTimeout(shutdownCtx, 10*time.Second)
+		if err := a.hotWriter.Stop(stopCtx); err != nil {
+			a.logger().Warn("hot writer stop error", "error", err)
+			errs = append(errs, fmt.Errorf("hot writer stop: %w", err))
+		}
+		cancel()
+	}
+	// The marker owner drains before the Redis client closes. A marker left behind is at worst
+	// a missing observability key; the repair already asked for the bucket.
+	markerCtx, markerCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+	a.stopColdMarkers(markerCtx)
+	markerCancel()
 	if a.qdbPipeline != nil {
 		a.qdbPipeline.Stop(shutdownCtx)
 	}
@@ -192,6 +205,7 @@ func (a *App) stopKlineFeed() {
 	liveFeed := a.klineFeed
 	closingScope := a.klineScope
 	a.klineFeed = nil
+	a.publishKlineSnapshotLocked()
 	a.klineMu.Unlock()
 	if a.candleEngine != nil && closingScope != "" {
 		a.candleEngine.UnregisterDerivedScope(closingScope)

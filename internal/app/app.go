@@ -14,6 +14,7 @@ import (
 	binancesdk "github.com/marxms/go-whale/internal/adapters/outbound/binance"
 	"github.com/marxms/go-whale/internal/adapters/outbound/binancerest"
 	"github.com/marxms/go-whale/internal/adapters/outbound/binancews"
+	"github.com/marxms/go-whale/internal/adapters/outbound/bingx"
 	"github.com/marxms/go-whale/internal/adapters/outbound/exchange"
 	"github.com/marxms/go-whale/internal/adapters/outbound/questdb"
 	redisstore "github.com/marxms/go-whale/internal/adapters/outbound/redis"
@@ -68,6 +69,15 @@ type App struct {
 	klineFailures     int
 	klineHealthySince time.Time
 	klineNextAttempt  time.Time
+	// klineReconnectExhausted is terminal: the bounded attempts are spent and the watchdog stopped
+	// redialing. The health probe publishes it so a silent scope is not mistaken for a quiet one.
+	klineReconnectExhausted bool
+	// Health probes must NEVER block on klineMu: the watchdog holds it across Stop/Start, whose
+	// dials are bounded at 40 s, while the compose healthcheck times out at 3 s. These atomics
+	// publish the last coherent state; a probe TRYs the lock and falls back to them.
+	klineFeedSnap      atomic.Value // klineFeedHolder
+	klineScopeSnap     atomic.Value // string
+	klineExhaustedSnap atomic.Bool
 	// klinePendingAttach holds symbols a previous attach failed on: already subscribed and
 	// seeded, so no later discovery cycle classifies them as new.
 	klinePendingAttach []string
@@ -87,6 +97,7 @@ type App struct {
 	serverProbe  redisstore.RedisServerProbe
 	store        *redisstore.CombinedStore
 	tieredStore  *engine.TieredStore
+	hotWriter    hotWriter
 	candleEngine *engine.CandleEngine
 	qdbPipeline  *questdb.Pipeline
 	qdbStore     *questdb.Store
@@ -99,10 +110,24 @@ type App struct {
 	// nonCoinSymbols holds the venue markets whose underlying is TradFi (EQUITY,
 	// COMMODITY, ...). They follow the venue's own trading hours, so the fleet-liveness
 	// denominator excludes them; their WebSocket health and gap recovery still apply.
-	nonCoinSymbols     sync.Map
+	nonCoinSymbols sync.Map
+	coldPending    sync.Map // exchange:market_type -> *atomic.Int64, the marked-not-durable depth
+	// coldMarker* is the single owner of the `cold_pending` marker write. The reader only
+	// enqueues: a Redis write there turns a stalled Redis into a silent partition.
+	coldMarkerMu         sync.Mutex
+	coldMarkerQueue      chan questdb.ColdID
+	coldMarkerStop       chan struct{}
+	coldMarkerDone       chan struct{}
+	coldMarkerStarted    bool
+	coldMarkerClosed     bool
+	coldMarkerStopClosed bool
+	coldMarkerDropped    atomic.Int64
+	// coldMarkerWrite is the observability write seam; nil uses the shared Redis client.
+	coldMarkerWrite    func(ctx context.Context, key string, ttl time.Duration) error
 	metrics            AppMetrics
 	streamMetrics      streaming.Metrics
 	binanceMetrics     binancesdk.Metrics
+	bingxMetrics       bingx.Metrics
 	ingestionMetrics   ingestion.Metrics
 	engineMetrics      engine.Metrics
 	collectorMetrics   collector.Metrics

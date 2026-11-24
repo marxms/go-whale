@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marxms/go-whale/internal/ingestion/streaming"
 	"github.com/marxms/go-whale/internal/trade"
 )
 
@@ -14,12 +15,25 @@ type TradeBuffer struct {
 	cap     int
 	mu      sync.Mutex
 	lastAdd time.Time
+	maxLen  int
+	lastDrain time.Time
 }
 
 // NewTradeBuffer creates a new buffer for the given symbol and capacity.
+//
+// Only the first tradeInitialPrealloc slots are pre-allocated. The 2026-11-23
+// production tuning raised the cap to 12000 for a gap-recovery burst; allocating
+// the full cap for all 500 symbols pushed the GC headroom into the degraded
+// band. The slice still grows to cap, so the burst guarantee is unchanged.
 func NewTradeBuffer(symbol string, capacity int) *TradeBuffer {
-	return &TradeBuffer{symbol: symbol, cap: capacity, trades: make([]trade.Trade, 0, capacity)}
+	initial := capacity
+	if initial > tradeInitialPrealloc {
+		initial = tradeInitialPrealloc
+	}
+	return &TradeBuffer{symbol: symbol, cap: capacity, trades: make([]trade.Trade, 0, initial)}
 }
+
+const tradeInitialPrealloc = 500
 
 // Append adds a trade and reports whether THIS trade was DROPPED.
 //
@@ -45,6 +59,11 @@ func (b *TradeBuffer) Append(trade trade.Trade) (dropped bool) {
 	}
 
 	b.trades = append(b.trades, trade)
+	// Max fill is the high-water mark since creation, not the current length:
+	// a buffer that burst and drained must keep the evidence of the burst.
+	if len(b.trades) > b.maxLen {
+		b.maxLen = len(b.trades)
+	}
 	b.lastAdd = time.Now()
 	return false
 }
@@ -62,6 +81,9 @@ func (b *TradeBuffer) Flush() []trade.Trade {
 	}
 	out := make([]trade.Trade, len(b.trades))
 	copy(out, b.trades)
+	// The drain clock is set only when trades actually left the buffer. An
+	// empty poll must not refresh the age and hide a stalled drain.
+	b.lastDrain = time.Now()
 
 	// clear BEFORE truncating, and that order is the whole point.
 	//
@@ -92,6 +114,18 @@ func (b *TradeBuffer) TimeSinceLastAdd() time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return time.Since(b.lastAdd)
+}
+
+// stats returns the locked snapshot the sampler publishes.
+func (b *TradeBuffer) stats() streaming.BufferStats {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return streaming.BufferStats{
+		Current:   len(b.trades),
+		Max:       b.maxLen,
+		Capacity:  b.cap,
+		LastDrain: b.lastDrain,
+	}
 }
 
 // BufferManager manages per-symbol TradeBuffers.
@@ -129,6 +163,19 @@ func (m *BufferManager) Remove(symbol string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.buffers, symbol)
+}
+
+// GetBufferStats returns the exact snapshot for a symbol. false means the
+// symbol has no buffer in this manager, which the sampler reads as "not
+// measured here" rather than as an empty buffer.
+func (m *BufferManager) GetBufferStats(symbol string) (streaming.BufferStats, bool) {
+	m.mu.RLock()
+	buffer, ok := m.buffers[symbol]
+	m.mu.RUnlock()
+	if !ok {
+		return streaming.BufferStats{}, false
+	}
+	return buffer.stats(), true
 }
 
 // FlushAll returns a map of symbol → trades for all non-empty buffers.

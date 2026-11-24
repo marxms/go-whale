@@ -830,6 +830,12 @@ func TestLifecycle_EngineCloseMergesFoldsAndPersists(t *testing.T) {
 		t.Fatalf("closed 5m bucket = %+v (present=%t), want the merged volume 8", closed5m, ok)
 	}
 
+	if app.hotWriter == nil {
+		t.Fatal("the hot writer was not wired for the close path")
+	}
+	if err := app.hotWriter.Stop(context.Background()); err != nil {
+		t.Fatalf("hot writer stop: %v", err)
+	}
 	hot5m, err := app.redisStore.GetCandlesAsc(context.Background(), exchange, marketType, symbol, "5m", 64)
 	if err != nil {
 		t.Fatalf("read hot 5m: %v", err)
@@ -1010,6 +1016,12 @@ func TestLifecycle_ColdTierUnavailableDegradesAndKeepsGuards(t *testing.T) {
 	app.candleEngine.UpdateCandle(key.Exchange, key.MarketType, key.Symbol, "5m", candle.Candle{
 		Timestamp: base + 5*60*1000, Open: 101, High: 102, Low: 100, Close: 101.5, Volume: 11,
 	})
+	if app.hotWriter == nil {
+		t.Fatal("the hot writer was not wired for the close path")
+	}
+	if err := app.hotWriter.Stop(context.Background()); err != nil {
+		t.Fatalf("hot writer stop: %v", err)
+	}
 	hot, err := app.redisStore.GetCandlesAsc(context.Background(), key.Exchange, key.MarketType, key.Symbol, "5m", 8)
 	if err != nil || len(hot) == 0 || hot[0].Timestamp != base {
 		t.Fatalf("cold-tier failure disabled the hot close write: %+v err=%v", hot, err)
@@ -1182,9 +1194,21 @@ func TestLifecycle_PublisherFailureDegradesWithoutDisablingGuards(t *testing.T) 
 	if got, ok := app.continuityTracker().LatestClosed(key); !ok || got != base+63*5*60*1000 {
 		t.Fatalf("publisher failure stopped the continuity baseline: %d (present=%t)", got, ok)
 	}
-	hot, err := app.redisStore.GetCandlesAsc(context.Background(), key.Exchange, key.MarketType, key.Symbol, "5m", 64)
-	if err != nil || len(hot) == 0 {
-		t.Fatalf("publisher failure disabled the hot-tier close write: %v", err)
+	// The hot write is a 50 ms write-behind: poll for it instead of assuming the flush already
+	// ran. The assertion is unchanged — a publisher failure must not disable the hot path — but
+	// it no longer depends on scheduler order (it flaked under the full suite).
+	var hot []candle.Candle
+	var err error
+	hotDeadline := time.Now().Add(2 * time.Second)
+	for {
+		hot, err = app.redisStore.GetCandlesAsc(context.Background(), key.Exchange, key.MarketType, key.Symbol, "5m", 64)
+		if err == nil && len(hot) > 0 {
+			break
+		}
+		if time.Now().After(hotDeadline) {
+			t.Fatalf("publisher failure disabled the hot-tier close write: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	// Expected scopes, coverage and liveness are configured independently of the transport.

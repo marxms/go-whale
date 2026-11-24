@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marxms/go-whale/internal/ingestion/streaming"
 	logger "github.com/marxms/go-whale/internal/platform/logging"
 	"github.com/marxms/go-whale/internal/platform/netdiag"
 	"github.com/marxms/go-whale/internal/trade"
@@ -32,6 +33,12 @@ type BingXConnectionPool struct {
 	symbolMap   map[string]int // symbol -> connection index
 	mu          sync.RWMutex
 	netdiag     *netdiag.Correlator
+	metrics     Metrics
+
+	// connectClient is the Connect seam: tests observe the client's partition
+	// AT CONNECT TIME, so moving SetPartition after Connect makes the test red.
+	// Nil falls back to the real client.Connect.
+	connectClient func(*BingXClient, context.Context) error
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -49,6 +56,7 @@ func newBingXPool(config ClientConfig, logs ...*slog.Logger) *BingXConnectionPoo
 		maxConnectionsPerIP:     resolvePositive(config.MaxConnectionsPerIP, DefaultBingXMaxConnectionsPerIP),
 		connections:             []*BingXClient{},
 		symbolMap:               make(map[string]int),
+		connectClient:           func(client *BingXClient, ctx context.Context) error { return client.Connect(ctx) },
 		ctx:                     ctx,
 		cancel:                  cancel,
 	}
@@ -61,6 +69,17 @@ func (p *BingXConnectionPool) SetNetdiag(correlator *netdiag.Correlator) {
 	p.netdiag = correlator
 	for _, client := range p.connections {
 		client.SetNetdiag(correlator)
+	}
+}
+
+// SetMetrics injects the drop port into the pool and every existing client.
+// New clients receive it before Connect, alongside their partition.
+func (p *BingXConnectionPool) SetMetrics(metrics Metrics) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.metrics = metrics
+	for _, client := range p.connections {
+		client.SetMetrics(metrics)
 	}
 }
 
@@ -98,9 +117,19 @@ func (p *BingXConnectionPool) Subscribe(ctx context.Context, symbol string) erro
 		logger.OrDiscard(p.log).Info("bingx pool: creating connection",
 			"connections", len(p.connections), "total_symbols", len(p.symbolMap)+1)
 
+		// The partition is the connection's REAL identity. Assign it BEFORE
+		// Connect: a failed or later cleanup must never report a partition
+		// derived from map order or from a symbolMap lookup after a rebalance.
+		connIndex = len(p.connections)
 		client := NewBingXClient(p.config, p.log)
 		client.SetNetdiag(p.netdiag)
-		if err := client.Connect(ctx); err != nil {
+		client.SetMetrics(p.metrics)
+		client.SetPartition(connIndex)
+		connect := p.connectClient
+		if connect == nil {
+			connect = func(client *BingXClient, ctx context.Context) error { return client.Connect(ctx) }
+		}
+		if err := connect(client, ctx); err != nil {
 			return fmt.Errorf("failed to connect a new connection: %w", err)
 		}
 
@@ -293,7 +322,8 @@ func (p *BingXConnectionPool) countSymbolsInConnection(connIndex int) int {
 // the loss is silent — a consumer's type assertion just returns ok=false.
 var (
 	_ StreamingClient = (*BingXConnectionPool)(nil)
-	_ BufferFillAware = (*BingXConnectionPool)(nil)
+	_ BufferFillAware  = (*BingXConnectionPool)(nil)
+	_ BufferStatsAware = (*BingXConnectionPool)(nil)
 	_ StatsProvider   = (*BingXConnectionPool)(nil)
 )
 
@@ -316,6 +346,18 @@ func (p *BingXConnectionPool) GetBufferFillRatio(symbol string) float64 {
 		return 0
 	}
 	return p.connections[connIndex].GetBufferFillRatio(symbol)
+}
+
+// GetBufferStats forwards the timer-sampled snapshot to the owning connection.
+func (p *BingXConnectionPool) GetBufferStats(symbol string) (streaming.BufferStats, bool) {
+	p.mu.RLock()
+	connIndex, exists := p.symbolMap[symbol]
+	conns := len(p.connections)
+	p.mu.RUnlock()
+	if !exists || connIndex >= conns {
+		return streaming.BufferStats{}, false
+	}
+	return p.connections[connIndex].GetBufferStats(symbol)
 }
 
 // NOTE (deliberately not fixed here): BingXConnectionPool does NOT implement

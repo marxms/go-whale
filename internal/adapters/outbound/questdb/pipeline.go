@@ -131,9 +131,20 @@ func NewPipeline(store candle.ColdStore, bufferCap int, flushInterval time.Durat
 	}
 }
 
-// Enqueue adds a closed candle to the pipeline buffer.
-// Non-blocking: if the buffer is full, the candle is dropped and a warning is logged.
-func (p *Pipeline) Enqueue(exchange, marketType, symbol, timeframe string, c candle.Candle) {
+// ColdID identifies the closed candle an Enqueue refused, so the caller can mark it and
+// schedule a targeted repair without opening a second cold writer.
+type ColdID struct {
+	Exchange   string
+	MarketType string
+	Symbol     string
+	Timeframe  string
+	Timestamp  int64
+}
+
+// Enqueue adds a closed candle to the pipeline buffer and reports whether it was admitted.
+// Non-blocking: if the buffer is full, the candle is refused and its identity returned so the
+// caller can mark it not-durable; the drop is counted and the first one logged.
+func (p *Pipeline) Enqueue(exchange, marketType, symbol, timeframe string, c candle.Candle) (bool, ColdID) {
 	entry := candleEntry{
 		Exchange:   exchange,
 		MarketType: marketType,
@@ -141,11 +152,20 @@ func (p *Pipeline) Enqueue(exchange, marketType, symbol, timeframe string, c can
 		Timeframe:  timeframe,
 		Candle:     c,
 	}
+	id := ColdID{
+		Exchange:   exchange,
+		MarketType: marketType,
+		Symbol:     symbol,
+		Timeframe:  timeframe,
+		Timestamp:  c.Timestamp,
+	}
 
 	select {
 	case p.buffer <- entry:
+		return true, id
 	default:
 		dropped := p.dropped.Add(1)
+		p.metrics.incColdPipelineDropped(exchange, marketType)
 		if dropped%100 == 1 {
 			logger.OrDiscard(p.log).Warn("questdb pipeline: buffer full; dropped candle",
 				"exchange", exchange,
@@ -154,6 +174,7 @@ func (p *Pipeline) Enqueue(exchange, marketType, symbol, timeframe string, c can
 				"timeframe", timeframe,
 				"total_dropped", dropped)
 		}
+		return false, id
 	}
 }
 

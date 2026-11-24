@@ -168,16 +168,18 @@ See [`docs/configuration.md`](docs/configuration.md) for the full catalogue and
 | `GET` | `/openapi.json` | generated route contract |
 | `GET` | `/api/subscriptions` | active symbols grouped by exchange/market, timeframes and optional margin rates |
 | `GET` | `/api/timeseries` | candle series for one symbol and timeframe |
+| `GET` | `/api/batch/timeseries` | one timeframe for many symbols (max 10,000 candles/request) |
 | `GET` | `/api/batch/prices` | latest prices for a symbol set |
 | `GET` | `/api/batch/derivatives-series` | derivatives series for a symbol set |
-| `GET` | `/api/ws-ticket` | short-lived ticket (opt-in; requires both WS secrets and the gateway header) |
+| `GET` | `/api/ws-ticket` | short-lived ticket (opt-in; ticket secret required, mint header only when the mint token is configured) |
 | `GET` | `/api/ws` | opt-in WebSocket feed, mounted with the ticket endpoint |
 
-The WebSocket edge is opt-in: empty `GOWHALE_REALTIME_WS_TICKET_SECRET` and
-`GOWHALE_REALTIME_WS_MINT_TOKEN` disable it. The authenticating gateway must inject
-`X-Gowhale-Mint-Token` on `/api/ws-ticket`; the server never treats the mint endpoint
-as a user-auth boundary. The OpenAPI document at `/openapi.json` lists the routes;
-query parameters and examples are in [`docs/api.md`](docs/api.md).
+The WebSocket edge is opt-in: an empty `GOWHALE_REALTIME_WS_TICKET_SECRET` disables it.
+`GOWHALE_REALTIME_WS_MINT_TOKEN` is optional and belongs to a gateway that mints
+tickets server-side; when it is absent, `/api/ws-ticket` must stay behind the gateway's
+JWT `auth_request`, because the endpoint is not a user-auth boundary. The OpenAPI
+document at `/openapi.json` lists the routes; query parameters and examples are in
+[`docs/api.md`](docs/api.md).
 
 ## How it works
 

@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +30,11 @@ const (
 	readLimit       = 64 * 1024 * 1024
 	handshakeWait   = 45 * time.Second
 	writeWait       = 10 * time.Second
+	// dialWait bounds the TCP connect of a socket without pinned edges. Gorilla's default
+	// dialer is net.Dial with NO timeout, so a blackholed edge can stall the dial for the
+	// kernel's SYN retries (~2 min) — measured 2026-11-24: the kline watchdog was delayed
+	// 89 s behind a dial like this. The pinned path already bounds each edge.
+	dialWait = 10 * time.Second
 )
 
 const defaultRenewalInterval = 23 * time.Hour
@@ -38,6 +45,46 @@ var (
 	ErrNotConnected    = errors.New("binancews: connection not established")
 	ErrHandlerRequired = errors.New("binancews: handler required")
 )
+
+// WHO closed the socket decides what the close MEANS. A renewal or an explicit shutdown is ours;
+// counting either as an exchange fault is how "the exchange failed" gets asserted without proof.
+const (
+	InitiatorRemote        = "remote"
+	InitiatorLocalShutdown = "local_shutdown"
+	InitiatorLocalRenewal  = "local_renewal"
+)
+
+// CloseEvidence is what the transport retained about why a connection ended. Code is zero when the
+// peer never sent a close frame — which is itself the fact worth recording: 1006 is synthesized
+// locally and proves nothing about the venue.
+type CloseEvidence struct {
+	Code      int
+	Reason    string
+	Initiator string
+	// DialAge is how long the connection had been established when it ended. It separates a
+	// venue that drops a long-lived socket from a network that cannot keep one.
+	DialAge time.Duration
+	// Streams is how many streams the closed connection carried. The failure rate the owner
+	// needs is per stream, not per connection.
+	Streams int
+	// SisterLastFrameAge is stamped by the partitioned owner: the age of the freshest sibling
+	// partition's last frame. Zero means no sister (or none observed).
+	SisterLastFrameAge time.Duration
+	// Component names the owner of this socket ("trade", "kline", "spot"). A close is only
+	// attributable when the log says which transport lost it.
+	Component string
+	// RemoteAddr is the peer address the socket was actually dialed to (IP:port), so a close
+	// can be assigned to an edge without a packet capture.
+	RemoteAddr string
+	// LastFrameAge is how long THIS socket had been silent when it ended. It separates a peer
+	// close on a live stream from a half-open socket the read deadline caught.
+	LastFrameAge time.Duration
+	// Pings and PongErrors count venue pings answered and pong writes that failed. A silent
+	// socket with pong errors names the write path; a silent socket with zero pings names the
+	// read path.
+	Pings      int64
+	PongErrors int64
+}
 
 // Handler receives the `data` object of one combined-stream frame. It runs on
 // the connection's single reader goroutine; handlers must not block on another
@@ -77,6 +124,12 @@ type Connection struct {
 
 	dialer *websocket.Dialer
 
+	// pinnedEdges are optional host:port endpoints tried before the venue's
+	// DNS. A resolver answer that lands on a flapping edge would otherwise pin
+	// every reconnect to it. Empty means plain DNS.
+	pinnedEdges []string
+	edgeCursor  atomic.Uint64
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -93,10 +146,30 @@ type Connection struct {
 	handlers   map[string]Handler
 
 	lastMessageAt atomic.Int64
+	// dialedAtMs is when the socket was established; the evidence reports its age at close.
+	dialedAtMs atomic.Int64
+	// streams is the number of streams the connection carried, fixed at Connect.
+	streams atomic.Int32
+
+	// component names the owner of this socket; it is retained in the close evidence.
+	component string
+	// remoteAddr is the peer actually dialed (IP:port), retained at Connect.
+	remoteAddr atomic.Value // string
+	// pings/pongErrors count venue pings and failed pong writes for the close evidence.
+	pings      atomic.Int64
+	pongErrors atomic.Int64
 
 	done  chan struct{}
 	errCh chan error
 	wg    sync.WaitGroup
+
+	// The evidence survives the close: nothing retained it before, and the terminal error was
+	// dropped when the channel was full, so a 1006 could not be attributed.
+	evidenceMu sync.Mutex
+	evidence   CloseEvidence
+	lastErrMu  sync.Mutex
+	lastErr    error
+	dropped    atomic.Int64
 }
 
 // Option adjusts a connection before it dials.
@@ -105,6 +178,11 @@ type Option func(*Connection)
 // WithReadIdle sets the documented idle read deadline. Zero disables it.
 func WithReadIdle(idle time.Duration) Option {
 	return func(c *Connection) { c.readIdle = idle }
+}
+
+// WithComponent labels the socket's owner so a close is attributable by transport.
+func WithComponent(name string) Option {
+	return func(c *Connection) { c.component = strings.TrimSpace(name) }
 }
 
 // WithRoute selects the venue's stream-class prefix, such as /market for kline
@@ -117,6 +195,20 @@ func WithRoute(route string) Option {
 			route = "/" + route
 		}
 		c.route = route
+	}
+}
+
+// WithPinnedEdges pins the TCP dial to these host:port endpoints, in rotation,
+// before falling back to the URL host. The TLS SNI and Host header remain the
+// URL's, so the venue's certificate still matches.
+func WithPinnedEdges(edges []string) Option {
+	return func(c *Connection) {
+		c.pinnedEdges = c.pinnedEdges[:0]
+		for _, edge := range edges {
+			if edge = strings.TrimSpace(edge); edge != "" {
+				c.pinnedEdges = append(c.pinnedEdges, edge)
+			}
+		}
 	}
 }
 
@@ -141,6 +233,14 @@ func NewConnection(id int, baseURL string, opts ...Option) *Connection {
 	for _, opt := range opts {
 		opt(conn)
 	}
+	if len(conn.pinnedEdges) > 0 {
+		conn.dialer.NetDialContext = conn.pinnedDialContext
+	} else {
+		conn.dialer.NetDialContext = (&net.Dialer{
+			Timeout:   dialWait,
+			KeepAlive: 15 * time.Second,
+		}).DialContext
+	}
 	return conn
 }
 
@@ -159,6 +259,46 @@ func closeHandshakeResponse(resp *http.Response) {
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
+}
+
+// pinnedDialContext tries the pinned edges in rotation, then falls back to the
+// URL host. The rotation starts at the connection id so partitions fan out
+// instead of all taking the first edge.
+func (c *Connection) pinnedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	port := "443"
+	if _, parsed, err := net.SplitHostPort(addr); err == nil {
+		port = parsed
+	}
+	edges := c.pinnedEdges
+	if len(edges) == 0 {
+		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+	}
+	start := 0
+	if c.ID != 0 {
+		start = c.ID % len(edges)
+	}
+	offset := int(c.edgeCursor.Add(1) - 1)
+	var lastErr error
+	for i := 0; i < len(edges); i++ {
+		edge := edges[(start+offset+i)%len(edges)]
+		host, edgePort, err := net.SplitHostPort(edge)
+		if err != nil {
+			host, edgePort = edge, port
+		}
+		conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, net.JoinHostPort(host, edgePort))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+	if err == nil {
+		return conn, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, err
 }
 
 // Connect dials a combined-stream URL and installs every handler before the
@@ -182,6 +322,10 @@ func (c *Connection) Connect(ctx context.Context, handlers map[string]Handler) e
 	}
 	c.handlersMu.Unlock()
 
+	c.handlersMu.RLock()
+	streamCount := len(c.handlers)
+	c.handlersMu.RUnlock()
+
 	target, err := c.urlFor(handlers)
 	if err != nil {
 		return err
@@ -195,8 +339,10 @@ func (c *Connection) Connect(ctx context.Context, handlers map[string]Handler) e
 	conn.SetReadLimit(readLimit)
 	c.extendReadDeadline(conn)
 	conn.SetPingHandler(func(payload string) error {
+		c.pings.Add(1)
 		c.extendReadDeadline(conn)
 		if err := conn.WriteControl(websocket.PongMessage, []byte(payload), time.Now().Add(writeWait)); err != nil {
+			c.pongErrors.Add(1)
 			return err
 		}
 		return nil
@@ -210,7 +356,14 @@ func (c *Connection) Connect(ctx context.Context, handlers map[string]Handler) e
 	}
 	c.conn = conn
 	c.connected.Store(true)
-	c.lastMessageAt.Store(time.Now().UnixMilli())
+	if remote := conn.UnderlyingConn().RemoteAddr(); remote != nil {
+		c.remoteAddr.Store(remote.String())
+	}
+	nowMs := time.Now().UnixMilli()
+	c.lastMessageAt.Store(nowMs)
+	c.dialedAtMs.Store(nowMs)
+	// The stream count is bounded by maxStreamsPerConnection (URL budget), far below MaxInt32.
+	c.streams.Store(int32(streamCount)) //nolint:gosec // G115: bounded by maxStreamsPerConnection.
 	c.connMu.Unlock()
 
 	c.wg.Add(1)
@@ -246,9 +399,17 @@ func joinStreams(streams []string) string {
 		if i > 0 {
 			out += "/"
 		}
-		out += stream
+		out += encodeStreamName(stream)
 	}
 	return out
+}
+
+// encodeStreamName percent-encodes the stream name for the combined-stream query. The
+// venue publishes symbols that are not ASCII (measured 2026-11-24: 币安人生USDT), and a raw
+// UTF-8 request target is not valid; the "@" stays literal because it is the documented
+// symbol/channel separator, and the venue decodes each name after splitting on "/".
+func encodeStreamName(stream string) string {
+	return strings.ReplaceAll(url.QueryEscape(stream), "%40", "@")
 }
 
 // Subscribe registers a handler before asking the venue to add the stream, then
@@ -328,7 +489,7 @@ func (c *Connection) readLoop() {
 	for {
 		_, payload, err := c.conn.ReadMessage()
 		if err != nil {
-			c.stop(fmt.Errorf("binancews: read: %w", err))
+			c.stopWith(InitiatorRemote, fmt.Errorf("binancews: read: %w", err))
 			return
 		}
 		c.extendReadDeadline(c.conn)
@@ -416,19 +577,91 @@ func (c *Connection) renewalLoop(interval time.Duration) {
 	case <-c.ctx.Done():
 		return
 	case <-timer.C:
-		c.stop(errors.New("binancews: scheduled connection renewal"))
+		c.stopWith(InitiatorLocalRenewal, errors.New("binancews: scheduled connection renewal"))
 	}
 }
 
+// report records the terminal error and hands it to the watcher.
+//
+// The retained copy is not decoration: the channel holds ONE error, and a second one used to be
+// discarded in silence, leaving a reconnect with no cause.
 func (c *Connection) report(err error) {
+	if err == nil {
+		return
+	}
+	c.lastErrMu.Lock()
+	c.lastErr = err
+	c.lastErrMu.Unlock()
 	select {
 	case c.errCh <- err:
 	default:
+		c.dropped.Add(1)
 	}
 }
 
-func (c *Connection) stop(err error) {
+// CloseEvidence reports why the connection ended. Zero before it stops.
+func (c *Connection) CloseEvidence() CloseEvidence {
+	c.evidenceMu.Lock()
+	defer c.evidenceMu.Unlock()
+	return c.evidence
+}
+
+// SetSisterLastFrameAge stamps the partition's sibling health into the retained evidence. The
+// transport cannot know its siblings; the partitioned owner is the only one that can.
+func (c *Connection) SetSisterLastFrameAge(age time.Duration) {
+	c.evidenceMu.Lock()
+	c.evidence.SisterLastFrameAge = age
+	c.evidenceMu.Unlock()
+}
+
+// TerminalError reports the last error the connection produced, retained even when the watcher
+// channel was full.
+func (c *Connection) TerminalError() error {
+	c.lastErrMu.Lock()
+	defer c.lastErrMu.Unlock()
+	return c.lastErr
+}
+
+// DroppedReports counts terminal errors that did not reach the watcher channel.
+func (c *Connection) DroppedReports() int64 { return c.dropped.Load() }
+
+// closeCodeOf extracts the venue's close code, when the error carries one.
+func closeCodeOf(err error) (int, string) {
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return closeErr.Code, closeErr.Text
+	}
+	return 0, ""
+}
+
+// stopWith records the evidence BEFORE closing the socket: the close that follows must not erase
+// the code the venue already sent.
+func (c *Connection) stopWith(initiator string, err error) {
 	c.closeOnce.Do(func() {
+		code, reason := closeCodeOf(err)
+		dialAge := time.Duration(0)
+		if dialedAt := c.dialedAtMs.Load(); dialedAt > 0 {
+			dialAge = time.Since(time.UnixMilli(dialedAt))
+		}
+		lastFrameAge := time.Duration(0)
+		if last := c.lastMessageAt.Load(); last > 0 {
+			lastFrameAge = time.Since(time.UnixMilli(last))
+		}
+		remoteAddr, _ := c.remoteAddr.Load().(string)
+		c.evidenceMu.Lock()
+		c.evidence = CloseEvidence{
+			Code:         code,
+			Reason:       reason,
+			Initiator:    initiator,
+			DialAge:      dialAge,
+			Streams:      int(c.streams.Load()),
+			Component:    c.component,
+			RemoteAddr:   remoteAddr,
+			LastFrameAge: lastFrameAge,
+			Pings:        c.pings.Load(),
+			PongErrors:   c.pongErrors.Load(),
+		}
+		c.evidenceMu.Unlock()
 		c.connected.Store(false)
 		c.closed.Store(true)
 		c.cancel()
@@ -447,7 +680,7 @@ func (c *Connection) stop(err error) {
 
 // Close stops the reader and waits for every connection goroutine to exit.
 func (c *Connection) Close() error {
-	c.stop(nil)
+	c.stopWith(InitiatorLocalShutdown, nil)
 	c.wg.Wait()
 	return nil
 }

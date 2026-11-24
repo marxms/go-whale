@@ -153,3 +153,24 @@ func TestMintTicketReturnsValidTicket(t *testing.T) {
 	require.Equal(t, int64(31000), body.ExpiresAt) // clock 1000 + TTL 30s
 	require.NoError(t, ValidateTicket(testSecret(), body.Ticket, 1000))
 }
+
+// An edge without a mint token: the ticket endpoint is what the gateway exposes behind its own JWT
+// (auth_request). Without a mint configured the ticket is issued without that header, and
+// TICKET_SECRET still signs and validates the handshake. Requiring the mint to boot such an edge
+// refused a configuration that works.
+func TestMintTicketWithoutGatewayTokenMintsBehindTheGatewayAuth(t *testing.T) {
+	h := startHub(t, newFakeOpens())
+	s := NewServer(h, testSecret(), nil, []string{allowedOrigin}, 30*time.Second, func() int64 { return 1000 }, false)
+	defer stopHub(t, h)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/ws-ticket", nil)
+	rec := httptest.NewRecorder()
+	s.MintTicket(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body struct {
+		Ticket string `json:"ticket"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Ticket)
+}

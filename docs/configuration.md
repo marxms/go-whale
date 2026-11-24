@@ -25,7 +25,7 @@ variable wins when both are set.
 | `stream` | WebSocket buffer and connection limits |
 | `exchanges` | enabled venues, symbols, discovery and REST limits |
 | `derivatives` | polling cadence, series caps and bootstrap depth |
-| `candle_engine` | in-memory ring, timeframes, write-through and snapshot cadence |
+| `candle_engine` | in-memory ring, timeframes, write-through, snapshot cadence and the boot warm-seed budget |
 | `questdb` | cold-tier addresses, table, retention and WAL |
 | `retention` | budget ratios and the measured Redis container ceiling |
 
@@ -84,18 +84,20 @@ incident to report, not a reason to switch venues.
 | --- | --- |
 | `GOWHALE_REALTIME_CHANNEL_PREFIX` | Pub/Sub prefix, default `gowhale:realtime` |
 | `GOWHALE_REALTIME_WS_TICKET_SECRET` | HMAC secret for WS tickets; empty disables the edge |
-| `GOWHALE_REALTIME_WS_MINT_TOKEN` | server-to-gateway secret for the ticket-mint endpoint; both WS secrets are required |
+| `GOWHALE_REALTIME_WS_MINT_TOKEN` | OPTIONAL server-to-gateway secret for the ticket-mint endpoint; without it, `/api/ws-ticket` relies on the gateway JWT |
 | `GOWHALE_REALTIME_WS_TICKET_TTL_S` | ticket lifetime |
 | `GOWHALE_REALTIME_WS_ALLOWED_ORIGINS` | comma-separated origin allow-list |
 | `GOWHALE_REALTIME_WS_MAX_CONN_AGE_S` | maximum session age |
 | `GOWHALE_REALTIME_WS_MAX_CONNECTIONS` | global WS connection cap, default `4096` |
 | `GOWHALE_REALTIME_WS_MAX_SCOPES_PER_CONNECTION` | per-connection subscription cap, default `128` |
 | `GOWHALE_REALTIME_WS_AUTH_DISABLED` | explicit local-only auth disable |
+| `GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS` | boot warm-seed ceiling, 30..240, default 120; a present-but-invalid value fails the load |
 
-The WebSocket edge mounts only when **both** `GOWHALE_REALTIME_WS_TICKET_SECRET` and
-`GOWHALE_REALTIME_WS_MINT_TOKEN` are set to at least 32 random bytes. The
-authenticating gateway must inject `X-Gowhale-Mint-Token` on `/api/ws-ticket`; the
-mint endpoint is not a user-auth boundary by itself. Empty secrets disable the edge.
+The WebSocket edge mounts when `GOWHALE_REALTIME_WS_TICKET_SECRET` is set to at least
+32 random bytes. `GOWHALE_REALTIME_WS_MINT_TOKEN` is optional; when set, the
+authenticating gateway must inject `X-Gowhale-Mint-Token` on `/api/ws-ticket`. The mint
+endpoint is not a user-auth boundary by itself: without the mint token it must stay
+behind the gateway's JWT `auth_request`. Empty ticket secret disables the edge.
 Placeholders such as `replace-with-…` are rejected at boot.
 
 ### Discovery and subscriptions

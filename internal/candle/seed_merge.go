@@ -152,7 +152,7 @@ func UnionSeedInto(stored, incoming Candle, tfMs, now int64) Candle {
 		// activity in it, so the exchange has nothing to say about it.
 		healed.CreatedAt = FirstNonZeroInt(stored.CreatedAt, now)
 		healed.LateTradeCount = stored.LateTradeCount
-		healed.HasGap = stored.HasGap || incoming.HasGap
+		healed.HasGap, healed.GapKind = MergeGapMark(stored, incoming)
 		// A second independent settled REST read can confirm a previous marked replacement. Its
 		// request must start after the first response arrived; duplicate or overlapping requests
 		// cannot clear the mark.
@@ -162,6 +162,9 @@ func UnionSeedInto(stored, incoming Candle, tfMs, now int64) Candle {
 			incoming.RequestedAt > stored.FetchedAt && incoming.RequestedAt <= incoming.FetchedAt &&
 			incoming.FetchedAt <= now && SameExactSeedValues(stored, incoming) {
 			healed.HasGap = false
+			// A confirmed read clears the mark AND its cause; leaving the cause behind would keep a
+			// "why" attached to a bucket that is no longer marked.
+			healed.GapKind = GapUnknown
 		}
 
 		// A BUCKET WHOSE MEASUREMENT WAS ERASED MUST SAY SO.
@@ -177,6 +180,9 @@ func UnionSeedInto(stored, incoming Candle, tfMs, now int64) Candle {
 		// and onClose fires once per bucket, so this is at most ONE extra re-read per bucket.
 		if stored.Volume > incoming.Volume {
 			healed.HasGap = true
+			// Provisional, not volume-only: the replacement may be wrong in the prices too, so a
+			// derived parent must wait for the targeted re-read instead of folding this value.
+			healed.GapKind = GapProvisional
 		}
 		healed.LastUpdate = now
 		return healed

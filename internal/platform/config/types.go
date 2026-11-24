@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // ServerConfig defines HTTP server settings.
 type ServerConfig struct {
@@ -207,6 +210,13 @@ type CandleEngineConfig struct {
 	SnapshotIntervalMS int            `yaml:"snapshot_interval_ms" json:"snapshot_interval_ms"`
 	BingxMinIntervalMS int            `yaml:"bingx_min_interval_ms" json:"bingx_min_interval_ms"` // Milliseconds between BingX trade updates (default: 300)
 
+	// WarmSeedBudgetSeconds bounds the boot warm-seed pass. It is a BOOT budget, not a
+	// retention: the 60 s it replaces expired with 159 of 499 pairs per timeframe unseeded
+	// in PRD (2026-11-21), while the full fleet needs ~88 s at the measured 45 pairs/s. The
+	// ceiling is 240 s because the HTTP listener starts AFTER the seed: a larger value would
+	// starve the deploy's 300 s health deadline and the 3 min startup grace.
+	WarmSeedBudgetSeconds int `yaml:"warm_seed_budget_seconds,omitempty" json:"warm_seed_budget_seconds,omitempty"`
+
 	// RedisCapByTimeframe is the RESIDENT RETENTION of the candle ZSET, per timeframe. It is
 	// NOT the chart depth, and that separation is the whole point of the key existing.
 	//
@@ -221,6 +231,17 @@ type CandleEngineConfig struct {
 	//
 	// The vocabulary mirrors derivatives.series_cap_by_timeframe, and it is a YAML key.
 	RedisCapByTimeframe map[string]int `yaml:"redis_cap_by_timeframe,omitempty" json:"redis_cap_by_timeframe,omitempty"`
+}
+
+const defaultWarmSeedBudget = 120 * time.Second
+
+// WarmSeedBudget is the boot ceiling for the warm buffer seed. Zero means undeclared and
+// resolves to the default; Validate rejects a declared value outside 30..600 s.
+func (c CandleEngineConfig) WarmSeedBudget() time.Duration {
+	if c.WarmSeedBudgetSeconds > 0 {
+		return time.Duration(c.WarmSeedBudgetSeconds) * time.Second
+	}
+	return defaultWarmSeedBudget
 }
 
 // RedisCapFor returns the DECLARED resident cap of the candle ZSET for one timeframe, or 0

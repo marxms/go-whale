@@ -141,8 +141,9 @@ func NewRouterWithMetricsAndLogger(
 			r.Get("/api/batch/derivatives-series", mdHandler.GetBatchDerivativesSeries)
 		}
 
-		// Batch API — prices + volume24h for multiple symbols
+		// Batch API — prices + volume24h for multiple symbols, and one timeframe for many symbols.
 		r.Get("/api/batch/prices", handler.GetBatchPrices)
+		r.Get("/api/batch/timeseries", handler.GetBatchTimeseries)
 	})
 
 	// Public routes (no auth)

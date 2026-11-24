@@ -74,7 +74,10 @@ func (a *App) runPeriodicDiscovery(exCfg config.ExchangeConfig, interval time.Du
 			for _, sym := range discovered {
 				discoveredSet[market.NormalizeSymbol(sym)] = struct{}{}
 			}
-
+			// The registry must never be wider than the fleet this cycle selected: writes for a
+			// symbol outside it (a historical gap backfill, a seed from a previous generation) were
+			// re-registering themselves and the product showed more assets than max_assets until the
+			// next reconciliation.
 			prefix := exCfg.ID + ":" + string(marketType) + ":"
 			currentSubs := a.manager.ListSubscriptions()
 			currentSet := make(map[string]struct{})
@@ -133,6 +136,11 @@ func (a *App) runPeriodicDiscovery(exCfg config.ExchangeConfig, interval time.Du
 				// PARTIAL-DISCOVERY SAFETY FLOOR: skip ALL removals on a suspicious cycle.
 				if !derankHealthy {
 					return
+				}
+				// The registry must never be narrowed from a truncated response: SetFleet is part
+				// of the removal region, with the normalized market type the writes use.
+				if a.redisStore != nil {
+					a.redisStore.SetFleet(exCfg.ID, marketType.String(), discovered)
 				}
 
 				var derankedSymbols []string

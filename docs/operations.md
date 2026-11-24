@@ -51,6 +51,23 @@ substitute for the production measurement.
 Health distinguishes absent coverage, stale data and a healthy component. A
 component that is not mounted is never reported healthy.
 
+Per-partition fields: `partitions[]` carries `id`, `symbols`, `frames`,
+`last_frame_age_ms`, `reconnects`, `restores`, close evidence and `silent_symbols`;
+`silent_partitions[]` names a partition above the declared silent fraction with a
+fresh sister. `feed_reconnect_exhausted` is terminal: the bounded redial spent its
+attempts and does not retry on its own. `timeframe_freshness[]` reports the age of
+each served timeframe's newest bucket, so a frozen derived timeframe is visible under
+a live 5m. Those probes read a published snapshot and never wait on the watchdog's
+`klineMu`; a feed that is being re-dialed is reported from its last coherent state
+instead of stalling the 3 s healthcheck.
+
+Hot-tier write-behind: `hot_writer_depth` and `hot_writer_oldest_pending_seconds`
+show a slow Redis before it costs data; `hot_writer_dropped_total`,
+`hot_writer_failed_total` and `hot_writer_coalesced_total` count refusals, failed
+flushes (the batch is requeued) and same-bar replacements. `cold_pending_depth` is
+the CUMULATIVE count of cold refusals per exchange/market since process start — the
+bars are marked (`cold:pending:*`, 24 h TTL) and repaired; it is not a live depth.
+
 The fleet-liveness gate uses the per-symbol persisted candle on the fastest
 timeframe and reports a scope unhealthy when more than 20% of its **monitored**
 symbols are stale. Venue TradFi markets (Binance `underlyingType` other than

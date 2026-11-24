@@ -14,6 +14,7 @@ type Metrics struct {
 	SeedRepairEvicted             func()
 	SeedRepairOutsideRetention    func()
 	ColdAppendAborted             func()
+	CandleSanityViolationTotal    func(exchange, marketType, timeframe, violation string)
 
 	ColdMissingBuckets  func(exchange, marketType, timeframe string, v float64)
 	ColdSymbolsWithGaps func(exchange, marketType, timeframe string, v float64)
@@ -26,6 +27,50 @@ type Metrics struct {
 	DurableTimeframeCovered   func(timeframe string, v float64)
 	DurableIncoherentFunding  func(timeframe string, v float64)
 	DurableDimensionsMeasured func(v float64)
+
+	ColdPendingDepth func(exchange, marketType string, v float64)
+	ColdDurableFalse func(exchange, marketType string)
+
+	// Hot writer: the queue that keeps a slow Redis off the reader. Without these a sustained
+	// drop or a frozen flush is a counter nobody reads.
+	HotWriterDepth         func(v float64)
+	HotWriterOldestPending func(seconds float64)
+	HotWriterDropped       func()
+	HotWriterFailed        func()
+	HotWriterCoalesced     func()
+}
+
+func (m Metrics) hotWriterDropped() {
+	if m.HotWriterDropped != nil {
+		m.HotWriterDropped()
+	}
+}
+
+func (m Metrics) hotWriterFailed() {
+	if m.HotWriterFailed != nil {
+		m.HotWriterFailed()
+	}
+}
+
+func (m Metrics) hotWriterCoalesced() {
+	if m.HotWriterCoalesced != nil {
+		m.HotWriterCoalesced()
+	}
+}
+
+func (m Metrics) publishHotWriter(depth int, oldestSeconds float64) {
+	if m.HotWriterDepth != nil {
+		m.HotWriterDepth(float64(depth))
+	}
+	if m.HotWriterOldestPending != nil {
+		m.HotWriterOldestPending(oldestSeconds)
+	}
+}
+
+func (m Metrics) incColdDurableFalse(exchange, marketType string) {
+	if m.ColdDurableFalse != nil {
+		m.ColdDurableFalse(exchange, marketType)
+	}
 }
 
 func (m Metrics) incWarmSeed(exchange, marketType, timeframe, outcome string) {
@@ -67,6 +112,12 @@ func (m Metrics) incLateUpdate(exchange, marketType, timeframe, reason string) {
 func (m Metrics) addSeedMerge(exchange, marketType, timeframe, outcome string, n float64) {
 	if m.CandleSeedMergeTotal != nil {
 		m.CandleSeedMergeTotal(exchange, marketType, timeframe, outcome, n)
+	}
+}
+
+func (m Metrics) incCandleSanityViolation(exchange, marketType, timeframe, violation string) {
+	if m.CandleSanityViolationTotal != nil {
+		m.CandleSanityViolationTotal(exchange, marketType, timeframe, violation)
 	}
 }
 

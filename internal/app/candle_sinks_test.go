@@ -1,6 +1,10 @@
 package app
 
 import (
+	"context"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,6 +13,26 @@ import (
 	"github.com/marxms/go-whale/internal/candle"
 	"github.com/marxms/go-whale/internal/candle/engine"
 )
+
+type recordingHotWriter struct {
+	keys []engine.CompositeKey
+}
+
+func (r *recordingHotWriter) Enqueue(key engine.CompositeKey, _ candle.Candle) bool {
+	r.keys = append(r.keys, key)
+	return true
+}
+
+func (r *recordingHotWriter) Stop(context.Context) error { return nil }
+
+type recordingPublisher struct {
+	channels []string
+}
+
+func (p *recordingPublisher) Publish(_ context.Context, channel string, _ []byte) error {
+	p.channels = append(p.channels, channel)
+	return nil
+}
 
 func TestSeedRevisionFanoutDoesNotEnqueueColdTwice(t *testing.T) {
 	p := questdb.NewPipeline(nil, 8, time.Hour)
@@ -126,4 +150,104 @@ func TestOnCandleClose_NilSinksAreAllIndividuallySafe(t *testing.T) {
 	// This must be a complete no-op rather than a panic on the trade-processing goroutine.
 	a.onCandleClose(key, c)
 	a.onCandleRevised(key, c)
+}
+
+// The close path hands the hot write to the owner instead of writing Redis on the reader.
+func TestOnCandleCloseEnqueuesHotWrite(t *testing.T) {
+	t.Parallel()
+
+	hot := &recordingHotWriter{}
+	a := &App{hotWriter: hot}
+	key := engine.CompositeKey{Exchange: "binance", MarketType: "future", Symbol: "BTC/USDT", Timeframe: "5m"}
+	closed := candle.Candle{Timestamp: 1_700_000_000_000, Close: 100, Volume: 10}
+
+	a.onCandleClose(key, closed)
+
+	if len(hot.keys) != 1 || hot.keys[0] != key {
+		t.Fatalf("hot writes = %v, want the closed key %v", hot.keys, key)
+	}
+}
+
+// A correction travels the revised lane and never re-emits a close for the same bar.
+func TestOnCandleRevisedDoesNotReemitClose(t *testing.T) {
+	t.Parallel()
+
+	published := &recordingPublisher{}
+	producer := realtime.NewAsyncProducerWithLogger(
+		published,
+		"test",
+		func() int64 { return time.Now().UnixMilli() },
+		realtime.Metrics{},
+		slog.Default(),
+	)
+	a := &App{realtimeProducer: producer}
+	key := engine.CompositeKey{Exchange: "binance", MarketType: "future", Symbol: "BTC/USDT", Timeframe: "5m"}
+	revised := candle.Candle{Timestamp: 1_700_000_000_000, Close: 100, Volume: 279.983}
+
+	a.onCandleRevised(key, revised)
+	producer.Stop()
+
+	if len(published.channels) == 0 {
+		t.Fatal("the revision was not published")
+	}
+	for _, channel := range published.channels {
+		if strings.Contains(channel, "candle.close") {
+			t.Fatalf("the revision re-emitted a close on %q", channel)
+		}
+		if !strings.Contains(channel, "candle.revised") {
+			t.Fatalf("unexpected channel %q; want candle.revised", channel)
+		}
+	}
+}
+
+// TestRedisStallDoesNotBlockTheClosePath is the SPC-14 ratchet on the path the reader actually
+// calls: the cold_pending marker is written by a bounded owner, so a Redis that never answers
+// cannot hold onCandleClose. Before the owner existed, the Set ran inline with a 2s deadline.
+func TestRedisStallDoesNotBlockTheClosePath(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	app := &App{
+		coldMarkerWrite: func(ctx context.Context, _ string, _ time.Duration) error {
+			once.Do(func() { close(started) })
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+	defer func() {
+		close(release)
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		app.stopColdMarkers(stopCtx)
+		cancel()
+	}()
+
+	id := questdb.ColdID{
+		Exchange: "binance", MarketType: "future", Symbol: "BTC/USDT",
+		Timeframe: "5m", Timestamp: 1_700_000_000_000,
+	}
+	done := make(chan struct{})
+	go func() {
+		app.markColdPending(id)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("markColdPending waited on the marker write; the reader is exposed to Redis")
+	}
+
+	// The owner did receive the marker and is blocked in the write: the call returned because it
+	// only queued, not because the write was skipped.
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("the marker owner never attempted the write")
+	}
+	if app.coldMarkerDropped.Load() != 0 {
+		t.Fatalf("dropped = %d, want the marker admitted", app.coldMarkerDropped.Load())
+	}
 }

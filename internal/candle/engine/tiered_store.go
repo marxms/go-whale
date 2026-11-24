@@ -399,6 +399,39 @@ func (ts *TieredStore) GetCandleByTimestamp(_ context.Context, exchange, marketT
 	return c, nil
 }
 
+// ColdDurable reports whether the bar is readable from the cold tier after the adapter's apply
+// barrier. A hot copy is not proof of durability: the WAL target must be applied AND the bar must
+// be readable from the cold, never inferred from the hot tier.
+func (ts *TieredStore) ColdDurable(ctx context.Context, exchange, marketType, symbol, timeframe string, barMs int64) (bool, error) {
+	if ts.cold == nil {
+		return false, nil
+	}
+	if barrier, ok := ts.cold.(candle.ColdStoreApplyBarrier); ok {
+		target, err := barrier.CaptureApplyTarget(ctx)
+		if err != nil {
+			ts.metrics.incColdDurableFalse(exchange, marketType)
+			return false, err
+		}
+		if err := barrier.WaitApplied(ctx, target); err != nil {
+			ts.metrics.incColdDurableFalse(exchange, marketType)
+			return false, err
+		}
+	}
+	bar := time.UnixMilli(barMs)
+	candles, err := ts.cold.QueryRange(ctx, exchange, marketType, symbol, timeframe, bar, bar, 1)
+	if err != nil {
+		ts.metrics.incColdDurableFalse(exchange, marketType)
+		return false, err
+	}
+	for _, c := range candles {
+		if c.Timestamp == barMs {
+			return true, nil
+		}
+	}
+	ts.metrics.incColdDurableFalse(exchange, marketType)
+	return false, nil
+}
+
 // GetCandlesDesc returns the newest limit bars, reconciling with the cold tier when it is fresher.
 func (ts *TieredStore) GetCandlesDesc(ctx context.Context, exchange, marketType, symbol, timeframe string, limit int) ([]candle.Candle, error) {
 	hotCandles := ts.engine.GetCandlesDesc(exchange, marketType, symbol, timeframe, limit)

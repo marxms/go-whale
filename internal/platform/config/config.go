@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -90,6 +92,9 @@ func Load(path string) (Config, error) {
 
 	applyRealtimeEnv(&cfg)
 	applyCoinalyzeEnv(&cfg)
+	if err := applyCandleEngineEnv(&cfg); err != nil {
+		return Config{}, err
+	}
 	applyQuestDBEnv(&cfg)
 	applyDefaults(&cfg)
 	if err := Validate(cfg); err != nil {
@@ -196,6 +201,23 @@ func loadYAML(filename string) (Config, error) {
 	return cfg, nil
 }
 
+// applyCandleEngineEnv applies the candle-engine env overrides on BOTH load paths, the same
+// contract applyRealtimeEnv/applyCoinalyzeEnv follow. It returns an error, unlike its siblings:
+// a present-but-invalid warm-seed budget that silently fell back to the default is how a deploy
+// believes it applied a ceiling it never used.
+func applyCandleEngineEnv(cfg *Config) error {
+	raw, ok := os.LookupEnv("GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	seconds, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("config: GOWHALE_CANDLE_ENGINE_WARM_SEED_BUDGET_SECONDS=%q: %w", raw, err)
+	}
+	cfg.CandleEngine.WarmSeedBudgetSeconds = seconds
+	return nil
+}
+
 // applyRealtimeEnv populates the env-driven realtime edge config on BOTH the YAML and
 // env-only load paths (the ticket secret and origins are never stored in YAML).
 func applyRealtimeEnv(cfg *Config) {
@@ -263,12 +285,13 @@ func getEnv(key, fallback string) string {
 }
 
 func getEnvInt(key string, fallback int) int {
-	value := os.Getenv(key)
+	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
 	}
-	var parsed int
-	_, err := fmt.Sscanf(value, "%d", &parsed)
+	// strconv.Atoi, not Sscanf: Sscanf accepts a numeric PREFIX, so "120s" became 120 and
+	// "1e3" became 1 — a typo silently applied a different value than the one written.
+	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		return fallback
 	}
@@ -416,6 +439,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.CandleEngine.BingxMinIntervalMS == 0 {
 		cfg.CandleEngine.BingxMinIntervalMS = 300
 	}
+	if cfg.CandleEngine.WarmSeedBudgetSeconds == 0 {
+		cfg.CandleEngine.WarmSeedBudgetSeconds = int(defaultWarmSeedBudget / time.Second)
+	}
 
 	// Derivatives bootstrap depth is a CONSEQUENCE of retention, not a parallel choice:
 	// fetching deeper than the deepest retained series spends REST, CPU and boot time on
@@ -461,16 +487,17 @@ func Validate(cfg Config) error {
 	if cfg.LogFormat != "" && cfg.LogFormat != "text" && cfg.LogFormat != "json" {
 		return fmt.Errorf("server.log_format must be text or json, got %q", cfg.LogFormat)
 	}
-	if !cfg.RealtimeWSAuthDisabled {
-		ticketSet := cfg.RealtimeWSTicketSecret != ""
-		mintSet := cfg.RealtimeWSMintToken != ""
-		if ticketSet || mintSet {
-			if !ticketSet || !mintSet {
-				return fmt.Errorf("the WebSocket edge requires BOTH GOWHALE_REALTIME_WS_TICKET_SECRET and GOWHALE_REALTIME_WS_MINT_TOKEN; set GOWHALE_REALTIME_WS_AUTH_DISABLED=true only for local use")
-			}
-			if err := validateWSSecret("GOWHALE_REALTIME_WS_TICKET_SECRET", cfg.RealtimeWSTicketSecret); err != nil {
-				return err
-			}
+	if !cfg.RealtimeWSAuthDisabled && cfg.RealtimeWSTicketSecret != "" {
+		// TICKET_SECRET is what this edge needs: it signs the tickets the browser presents on the
+		// handshake, and every deployment that serves the chart edge has one.
+		if err := validateWSSecret("GOWHALE_REALTIME_WS_TICKET_SECRET", cfg.RealtimeWSTicketSecret); err != nil {
+			return err
+		}
+		// MINT_TOKEN belongs to a DIFFERENT hop: a gateway that mints tickets on the server's
+		// behalf. Where the edge mints its own at /api/ws-ticket — behind the gateway's JWT
+		// auth_request — the token is absent, and demanding it refused to boot an edge that was
+		// working. When it IS configured it must be valid, and the endpoint enforces it.
+		if cfg.RealtimeWSMintToken != "" {
 			if err := validateWSSecret("GOWHALE_REALTIME_WS_MINT_TOKEN", cfg.RealtimeWSMintToken); err != nil {
 				return err
 			}
@@ -489,6 +516,9 @@ func Validate(cfg Config) error {
 		if _, err := market.ParseTimeframe(tf); err != nil {
 			return fmt.Errorf("candle_engine.timeframes: %w", err)
 		}
+	}
+	if err := validateWarmSeedBudget(cfg.CandleEngine.WarmSeedBudgetSeconds); err != nil {
+		return err
 	}
 
 	seen := make(map[string]bool)
@@ -522,6 +552,15 @@ func Validate(cfg Config) error {
 		log.Printf("WARN: high trade buffer memory usage estimated: %d slots (~%d MB) (trade_buffer_size=%d * max_symbols=%d)", tradeBufferUsage, memMB, cfg.TradeBufferSize, cfg.MaxSymbolsPerInstance)
 	}
 
+	return nil
+}
+
+// validateWarmSeedBudget rejects a boot ceiling that is too short to seed the fleet or so
+// long it delays first health past the deploy deadline. Zero is undeclared and allowed.
+func validateWarmSeedBudget(seconds int) error {
+	if seconds != 0 && (seconds < 30 || seconds > 240) {
+		return fmt.Errorf("candle_engine.warm_seed_budget_seconds must be within 30..240, got %d", seconds)
+	}
 	return nil
 }
 

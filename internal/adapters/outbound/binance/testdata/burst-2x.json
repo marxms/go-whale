@@ -1,0 +1,12 @@
+{
+  "source": "SNDK/USDT gap-recovery burst 2026-11-23T01:44:20Z: max_fill=5000 e 182 BUFFER_OVERFLOW no mesmo dreno, portanto >=5182 trades antes do dreno; 2x do limite inferior por TRD-07; cap ajustado para 12000",
+  "exchange": "binance",
+  "marketType": "future",
+  "symbol": "SNDK/USDT",
+  "partition": 0,
+  "measuredPeakBurstPerSec": 5182,
+  "ratePerSec": 10364,
+  "multiplier": 2,
+  "burstTrades": 10364,
+  "resolvedCap": 12000
+}

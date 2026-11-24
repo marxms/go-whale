@@ -136,6 +136,69 @@ type Candle struct {
 	SideUnknownCount int64
 	LateTradeCount   int64
 	HasGap           bool
+	// GapKind says why the bucket is marked. A volume-only gap leaves OHLC exact, so a derived
+	// parent may be rebuilt from it; a provisional value may be wrong in the prices too.
+	GapKind GapKind
+}
+
+// GapKind classifies a HasGap mark.
+type GapKind uint8
+
+const (
+	// GapUnknown is the zero value and promises nothing about the prices.
+	GapUnknown GapKind = iota
+	// GapVolumeIncomplete means prices are exact and only the volume total is short.
+	GapVolumeIncomplete
+	// GapProvisional means a record replaced a live measurement and is not re-confirmed yet.
+	GapProvisional
+)
+
+// MergeGapMark combines two records' completeness marks. The mark survives if either side carries
+// it, and the cause is the weaker promise: volume-only only when every marked side says so.
+func MergeGapMark(stored, incoming Candle) (bool, GapKind) {
+	if !stored.HasGap && !incoming.HasGap {
+		return false, GapUnknown
+	}
+	if marksAreVolumeOnly(stored) && marksAreVolumeOnly(incoming) {
+		return true, GapVolumeIncomplete
+	}
+	return true, GapProvisional
+}
+
+// marksAreVolumeOnly reports whether a record's only defect is a short volume total.
+func marksAreVolumeOnly(c Candle) bool {
+	return !c.HasGap || c.GapKind == GapVolumeIncomplete
+}
+
+// GapCauseName projects the mark onto the wire name consumers read; empty for an unmarked bucket.
+func (c Candle) GapCauseName() string {
+	if !c.HasGap {
+		return ""
+	}
+	switch c.GapKind {
+	case GapVolumeIncomplete:
+		return "volume_incomplete"
+	case GapProvisional:
+		return "provisional"
+	default:
+		return "unknown"
+	}
+}
+
+// GapKindFromCause reverses GapCauseName for a wire reader. An unmarked bucket has no cause, and
+// an unknown name is treated as unknown — which blocks, because it promises nothing.
+func GapKindFromCause(cause string, marked bool) GapKind {
+	if !marked {
+		return GapUnknown
+	}
+	switch cause {
+	case "volume_incomplete":
+		return GapVolumeIncomplete
+	case "provisional":
+		return GapProvisional
+	default:
+		return GapUnknown
+	}
 }
 
 // ParseTimeframeMs returns the interval duration in milliseconds and whether

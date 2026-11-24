@@ -284,3 +284,37 @@ func TestDockerHostConfigMemory_UnreachableDaemonIsAnErrorNotZeroLimit(t *testin
 		t.Fatalf("limit = %d with an error, want 0", got)
 	}
 }
+
+// TestHealthAlarmsBeforeAuthoritativeEviction proves the alarm precedes the first eviction: with
+// evicted_keys still at zero, crossing the declared occupancy ratio must already alert, so an
+// authoritative key is not evicted before anyone was told. It is the SPC-21 ratchet.
+func TestHealthAlarmsBeforeAuthoritativeEviction(t *testing.T) {
+	monitor := NewRedisBudgetMonitor(0.8)
+
+	below := ParseRedisBudget(
+		"used_memory:790\nmaxmemory:1000\n",
+		"evicted_keys:0\n",
+		"db0:keys=10,expires=10\n",
+		1000,
+	)
+	if signal := monitor.Observe(below); signal.Alert {
+		t.Fatalf("79%% alerted before the crossing: %+v", signal)
+	}
+
+	above := ParseRedisBudget(
+		"used_memory:801\nmaxmemory:1000\n",
+		"evicted_keys:0\n",
+		"db0:keys=10,expires=10\n",
+		1000,
+	)
+	signal := monitor.Observe(above)
+	if !signal.Alert {
+		t.Fatalf("81%% with zero evictions did not alert: %+v", signal)
+	}
+	if signal.EvictedDelta != 0 {
+		t.Fatalf("evicted delta = %d, want zero — the alarm must lead the first eviction", signal.EvictedDelta)
+	}
+	if len(signal.Reasons) == 0 {
+		t.Fatal("an alert without a reason sends the operator to grep")
+	}
+}

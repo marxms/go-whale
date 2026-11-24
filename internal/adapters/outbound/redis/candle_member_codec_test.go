@@ -278,7 +278,7 @@ func TestGetCandlesDesc_UnknownVersionFailsLoudInsteadOfTruncating(t *testing.T)
 	}
 	if err := client.ZAdd(ctx, key,
 		redis.Z{Score: float64(lida.Timestamp), Member: lidaRaw},
-		redis.Z{Score: float64(lida.Timestamp + 300_000), Member: "v2|" + lidaRaw},
+		redis.Z{Score: float64(lida.Timestamp + 300_000), Member: "v9|" + lidaRaw}, // a version this binary does not read
 	).Err(); err != nil {
 		t.Fatalf("zadd: %v", err)
 	}

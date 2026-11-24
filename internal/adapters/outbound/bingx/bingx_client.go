@@ -89,9 +89,11 @@ type BingXClient struct {
 	connWg     sync.WaitGroup // Only tracks connection-scoped goroutines
 
 	// Internal per-symbol trade buffering
-	tradeBuffers  map[string][]trade.Trade
-	subscriptions map[string]bool // symbol -> subscribed
-	subsMu        sync.RWMutex
+	tradeBuffers         map[string][]trade.Trade
+	tradeBufferMax       map[string]int
+	tradeBufferLastDrain map[string]time.Time
+	subscriptions        map[string]bool // symbol -> subscribed
+	subsMu               sync.RWMutex
 
 	// Write mutex to prevent concurrent writes on the WebSocket
 	writeMu sync.Mutex
@@ -132,6 +134,18 @@ type BingXClient struct {
 	// netdiag correlates a disconnect with drops on other venues; the composition root
 	// injects the process-wide instance.
 	netdiag *netdiag.Correlator
+
+	// metrics is the drop-observability port; partition is the pool connection
+	// index, assigned BEFORE Connect. A cleanup therefore never derives the
+	// partition from map order or from a late symbolMap lookup.
+	metrics   Metrics
+	partition int
+
+	// dropLogMu/dropLogged keep the first log line per (reason, symbol,
+	// partition). The counter keeps every loss; the log keeps one line per
+	// location, so a hot symbol cannot drown a second symbol's first overflow.
+	dropLogMu  sync.Mutex
+	dropLogged map[string]struct{}
 }
 
 // NewBingXClient creates new BingX streaming client.
@@ -163,8 +177,10 @@ func NewBingXClient(config ClientConfig, logs ...*slog.Logger) *BingXClient {
 		config:           config,
 		log:              logger.OrDiscard(logs...),
 		tradeBufferSize:  bufSize,
-		tradeBuffers:     make(map[string][]trade.Trade),
-		subscriptions:    make(map[string]bool),
+		tradeBuffers:         make(map[string][]trade.Trade),
+		tradeBufferMax:       make(map[string]int),
+		tradeBufferLastDrain: make(map[string]time.Time),
+		subscriptions:        make(map[string]bool),
 		ctx:              ctx,
 		cancel:           cancel,
 		reconnectDelay:   InitialReconnectDelay,
@@ -178,6 +194,13 @@ func NewBingXClient(config ClientConfig, logs ...*slog.Logger) *BingXClient {
 
 // SetNetdiag injects the cross-venue disconnect correlator.
 func (c *BingXClient) SetNetdiag(correlator *netdiag.Correlator) { c.netdiag = correlator }
+
+// SetMetrics injects the drop-observability port.
+func (c *BingXClient) SetMetrics(metrics Metrics) { c.metrics = metrics }
+
+// SetPartition records the real pool connection index. The pool calls it
+// before Connect so a failed or later cleanup still names the right partition.
+func (c *BingXClient) SetPartition(partition int) { c.partition = partition }
 
 // closed reports whether Close canceled the client lifecycle. A zero-value fixture
 // built in a test without the constructor has a nil ctx; treat that as open rather than
@@ -373,6 +396,24 @@ func (c *BingXClient) GetBufferFillRatio(symbol string) float64 {
 	return float64(len(buffer)) / float64(c.tradeBufferSize)
 }
 
+// GetBufferStats is the timer-sampled snapshot: current fill, high-water mark,
+// resolved cap and last drain. The maps live under subsMu, the same lock that
+// guards the buffer itself, so the sample cannot tear.
+func (c *BingXClient) GetBufferStats(symbol string) (streaming.BufferStats, bool) {
+	c.subsMu.RLock()
+	defer c.subsMu.RUnlock()
+	buffer, ok := c.tradeBuffers[symbol]
+	if !ok {
+		return streaming.BufferStats{}, false
+	}
+	return streaming.BufferStats{
+		Current:   len(buffer),
+		Max:       c.tradeBufferMax[symbol],
+		Capacity:  c.tradeBufferSize,
+		LastDrain: c.tradeBufferLastDrain[symbol],
+	}, true
+}
+
 // GetTrades returns buffered trades and clears the buffer (implements StreamingClient).
 func (c *BingXClient) GetTrades(ctx context.Context, symbol string) ([]trade.Trade, error) {
 	if c.closed() {
@@ -401,6 +442,12 @@ func (c *BingXClient) GetTrades(ctx context.Context, symbol string) ([]trade.Tra
 	// buffer.go Flush already does, so the consumer owns its slice.
 	out := make([]trade.Trade, len(buf))
 	copy(out, buf)
+	// The drain clock moves only when trades actually left the buffer; an
+	// empty poll must not refresh it and mask a stalled drain.
+	if c.tradeBufferLastDrain == nil {
+		c.tradeBufferLastDrain = make(map[string]time.Time)
+	}
+	c.tradeBufferLastDrain[symbol] = time.Now()
 	c.tradeBuffers[symbol] = buf[:0]
 	c.subsMu.Unlock()
 
@@ -793,19 +840,32 @@ func (c *BingXClient) handleTradeMessage(msg map[string]interface{}) {
 
 	// Parse trades and add to buffer
 	for _, item := range data {
-		trade, err := c.parseTrade(symbol, item)
+		parsed, err := c.parseTrade(symbol, item)
 		if err != nil {
-			logger.OrDiscard(c.log).Warn("bingx: trade parse failed", "error", err)
+			if c.firstDropLog(trade.DropMalformedFrame, symbol) {
+				logger.OrDiscard(c.log).Warn("bingx: trade parse failed", "symbol", symbol,
+					"partition", c.partition, "error", err)
+			}
+			c.recordDrop(trade.DropMalformedFrame, symbol)
 			continue
 		}
 
 		// Add to buffer (limit size)
 		if len(c.tradeBuffers[symbol]) < c.tradeBufferSize {
-			c.tradeBuffers[symbol] = append(c.tradeBuffers[symbol], trade)
+			c.tradeBuffers[symbol] = append(c.tradeBuffers[symbol], parsed)
+			if c.tradeBufferMax == nil {
+				c.tradeBufferMax = make(map[string]int)
+			}
+			if len(c.tradeBuffers[symbol]) > c.tradeBufferMax[symbol] {
+				c.tradeBufferMax[symbol] = len(c.tradeBuffers[symbol])
+			}
 			c.tradesIn.Add(1)
 		} else {
-			c.tradesDropped.Add(1)
-			logger.OrDiscard(c.log).Warn("bingx: trade buffer full; dropping trade", "symbol", symbol)
+			if c.firstDropLog(trade.DropBufferOverflow, symbol) {
+				logger.OrDiscard(c.log).Warn("bingx: trade buffer full; dropping trade", "symbol", symbol,
+					"partition", c.partition, "cap", c.tradeBufferSize)
+			}
+			c.recordDrop(trade.DropBufferOverflow, symbol)
 		}
 	}
 	c.subsMu.Unlock()
@@ -881,6 +941,13 @@ func (c *BingXClient) cleanupOnError(err error) {
 	for symbol, buffer := range c.tradeBuffers {
 		if len(buffer) > 0 {
 			totalBufferedTrades += len(buffer)
+			// Every discarded item is ONE local drop. Counting the buffer once
+			// would make N losses look like one; counting after the reset below
+			// would hide them entirely. Iteration order is irrelevant: each item
+			// carries its own symbol and the client's pre-assigned partition.
+			for range buffer {
+				c.recordDrop(trade.DropCleanupDiscard, symbol)
+			}
 			logger.OrDiscard(c.log).Warn("bingx: discarding buffered trades due to disconnect",
 				"trades", len(buffer), "symbol", symbol)
 		}
@@ -911,6 +978,39 @@ func (c *BingXClient) cleanupOnError(err error) {
 		logger.OrDiscard(c.log).Warn("bingx: cleanup complete",
 			"cleared_buffers", bufferCount, "preserved_subscriptions", subscriptionCount)
 	}
+}
+
+// recordDrop spends one local cleanup loss on the legacy counter and on the
+// classified series carrying reason, symbol, market and the real partition.
+// It never advances a provider-missing count: a cleanup discard is a LOCAL
+// loss and must not be reported as a gap the exchange caused.
+func (c *BingXClient) recordDrop(reason trade.DropReason, symbol string) uint64 {
+	total := c.tradesDropped.Add(1)
+	// The config uses the venue vocabulary ("swap"); the metric carries the
+	// canonical "future" so BingX and Binance share one label.
+	marketType := market.MarketType(c.config.MarketType)
+	if canonical, err := market.ParseMarketType(c.config.MarketType); err == nil {
+		marketType = canonical
+	}
+	c.metrics.incTradesDroppedClassified(c.config.ExchangeID, marketType.String(), symbol, c.partition, string(reason))
+	return total
+}
+
+// firstDropLog reports whether this (reason, symbol, partition) is being logged
+// for the first time. The counter keeps every loss; the log keeps one line per
+// location, so a hot symbol cannot hide another symbol's first overflow.
+func (c *BingXClient) firstDropLog(reason trade.DropReason, symbol string) bool {
+	c.dropLogMu.Lock()
+	defer c.dropLogMu.Unlock()
+	if c.dropLogged == nil {
+		c.dropLogged = make(map[string]struct{})
+	}
+	key := string(reason) + "|" + symbol + "|" + strconv.Itoa(c.partition)
+	if _, exists := c.dropLogged[key]; exists {
+		return false
+	}
+	c.dropLogged[key] = struct{}{}
+	return true
 }
 
 // handleDisconnect handles connection loss and triggers reconnection. It is the single entry

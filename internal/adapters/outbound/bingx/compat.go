@@ -26,6 +26,8 @@ type (
 	ConnectionStats = streaming.ConnectionStats
 	// BufferFillAware exposes the trade buffer fill ratio.
 	BufferFillAware = streaming.BufferFillAware
+	// BufferStatsAware exposes the exact per-symbol buffer snapshot.
+	BufferStatsAware = streaming.BufferStatsAware
 	// SharedSubscriptionClient exposes combined-stream subscription support.
 	SharedSubscriptionClient = streaming.SharedSubscriptionClient
 	// StatsProvider exposes connection statistics.

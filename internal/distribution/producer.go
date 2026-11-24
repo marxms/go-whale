@@ -38,6 +38,12 @@ type ProducerHooks struct {
 	OnMarshalError func(typ EventType, err error)
 	// OnDrainTimeout reports that Stop abandoned the queued tail after the timeout.
 	OnDrainTimeout func(timeout time.Duration)
+	// OnQueueDepth reports how many events are waiting in one channel after an enqueue or a
+	// drain. A rising depth is the bus falling behind; it is not a drop yet.
+	OnQueueDepth func(channel string, depth int)
+	// OnOldestPendingAge reports the age of the oldest event still waiting in one channel. It
+	// updates on traffic, so a queue that stops receiving keeps the last observed value.
+	OnOldestPendingAge func(channel string, age time.Duration)
 }
 
 func (h ProducerHooks) drop(channel string, total int64) {
@@ -61,6 +67,18 @@ func (h ProducerHooks) marshalError(typ EventType, err error) {
 func (h ProducerHooks) drainTimeout(timeout time.Duration) {
 	if h.OnDrainTimeout != nil {
 		h.OnDrainTimeout(timeout)
+	}
+}
+
+func (h ProducerHooks) queueDepth(channel string, depth int) {
+	if h.OnQueueDepth != nil {
+		h.OnQueueDepth(channel, depth)
+	}
+}
+
+func (h ProducerHooks) oldestPendingAge(channel string, age time.Duration) {
+	if h.OnOldestPendingAge != nil {
+		h.OnOldestPendingAge(channel, age)
 	}
 }
 
@@ -94,6 +112,9 @@ type AsyncProducer struct {
 
 	queues sync.Map // EventType -> chan outboundEvent
 	seqs   sync.Map // EventType -> *atomic.Uint64
+	// oldest maps an EventType to the clock time its queue last became non-empty. It is the
+	// age basis the observability port reports; the owner clears it when the queue empties.
+	oldest sync.Map // EventType -> *atomic.Int64
 
 	// mu guards the LIFETIME of the queues, not their contents. A send and the close of
 	// the same channel must never overlap, so senders hold it shared and Stop holds it
@@ -175,8 +196,14 @@ func (p *AsyncProducer) enqueue(typ EventType, scope Scope, candle candle.Candle
 		return
 	}
 
+	wasEmpty := len(q) == 0
 	select {
 	case q <- outboundEvent{typ: typ, scope: scope, candle: candle}:
+		if wasEmpty {
+			oldest, _ := p.oldest.LoadOrStore(typ, new(atomic.Int64))
+			oldest.(*atomic.Int64).Store(p.clock())
+		}
+		p.observe(typ, q)
 	default:
 		// Drop-NEWEST. The alternative (drop-oldest) would require draining under a lock
 		// and buys nothing: either way the subscriber sees a sequence gap and reconciles.
@@ -219,6 +246,12 @@ func (p *AsyncProducer) own(typ EventType, q chan outboundEvent) {
 	channel := Channel(p.prefix, typ)
 
 	for ev := range q {
+		if len(q) == 0 {
+			if value, ok := p.oldest.Load(typ); ok {
+				value.(*atomic.Int64).Store(0)
+			}
+		}
+		p.observe(typ, q)
 		env := NewEnvelope(ev.typ, ev.scope, ev.candle, p.nextSeq(ev.typ), p.clock())
 		data, err := env.Marshal()
 		if err != nil {
@@ -232,6 +265,18 @@ func (p *AsyncProducer) own(typ EventType, q chan outboundEvent) {
 			p.hooks.publishError(channel, err)
 		}
 	}
+}
+
+func (p *AsyncProducer) observe(typ EventType, q chan outboundEvent) {
+	channel := Channel(p.prefix, typ)
+	p.hooks.queueDepth(channel, len(q))
+	var age time.Duration
+	if value, ok := p.oldest.Load(typ); ok {
+		if at := value.(*atomic.Int64).Load(); at > 0 {
+			age = time.Duration(p.clock()-at) * time.Millisecond
+		}
+	}
+	p.hooks.oldestPendingAge(channel, age)
 }
 
 // nextSeq claims the next per-channel sequence. It is called only from the owner

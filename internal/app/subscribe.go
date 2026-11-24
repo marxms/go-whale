@@ -194,6 +194,13 @@ func (a *App) autoSubscribe(ctx context.Context) {
 					subscribedMu.Lock()
 					subscribedSymbols[symKey] = struct{}{}
 					subscribedMu.Unlock()
+					// The active registry is the fleet the streamer SERVES, not the subset whose
+					// history has finished seeding. Registering right after the attach keeps the
+					// analyzer's universe stable across a restart instead of collapsing until the
+					// boot seeder completes (measured 2026-11-23: 500 -> 302, ~20 min to recover).
+					if err := a.redisStore.AddActiveSymbol(ctx, exCfg.ID, string(marketType), symbol); err != nil {
+						a.logger().Warn("failed to register active symbol", "symbol", symbol, "error", err)
+					}
 				}
 				// Heal the hole this startup left in the open bucket, right after the fleet is
 				// live. Marking must come first: under venue ownership the venue veto discards
@@ -206,7 +213,9 @@ func (a *App) autoSubscribe(ctx context.Context) {
 				if a.candleEngine != nil {
 					marked := 0
 					for _, tf := range candle.BootGapMarkTimeframes(binancesdk.KlineFeedInterval, a.cfg.CandleEngine.Timeframes) {
-						marked += a.candleEngine.MarkOpenBucketGapped(exCfg.ID, string(marketType), tf, symbols)
+						marks := a.candleEngine.MarkOpenBucketGapped(exCfg.ID, string(marketType), tf, symbols)
+						marked += len(marks)
+						a.candleEngine.RepairAncestors(exCfg.ID, string(marketType), tf, marks)
 					}
 					if marked > 0 {
 						a.logger().Warn("boot gap: open buckets marked incomplete", "buckets", marked, "exchange", exCfg.ID, "market_type", exCfg.MarketType)
@@ -283,6 +292,9 @@ func (a *App) autoSubscribe(ctx context.Context) {
 					subscribedMu.Lock()
 					subscribedSymbols[symKey] = struct{}{}
 					subscribedMu.Unlock()
+					if err := a.redisStore.AddActiveSymbol(ctx, exCfg.ID, string(marketType), symbol); err != nil {
+						a.logger().Warn("failed to register active symbol", "symbol", symbol, "error", err)
+					}
 
 					if idx < len(symbols)-1 {
 						time.Sleep(ingestion.SubscribePacing)

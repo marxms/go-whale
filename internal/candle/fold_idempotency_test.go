@@ -89,6 +89,40 @@ func TestUnionSeedInto_IsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCollectFoldChildren_AcceptsGappedChildAndMarksTheParent(t *testing.T) {
+	t.Parallel()
+
+	// A child that is PRESENT but marked gapped is missing volume, not missing price history. If
+	// the collector refuses it, the parent keeps its previous value: older than the child and still
+	// carrying HasGap=false, so a frozen bucket is published as clean. The mark must ride through
+	// the fold instead.
+	const base = int64(1_700_000_100_000)
+	kids := foldKids(base)
+	kids[0].HasGap = true
+	kids[0].GapKind = GapVolumeIncomplete
+	buf := NewRingBuffer[Candle](16)
+	for _, k := range kids {
+		buf.Push(k)
+	}
+
+	got, ok := CollectFoldChildren(buf, "5m", 3, base, base+3*300_000, 0)
+	if !ok {
+		t.Fatal("a present-but-gapped child blocked the fold; the parent would be served stale and unmarked")
+	}
+	if len(got) != 3 {
+		t.Fatalf("children = %d, want 3", len(got))
+	}
+
+	parent := FoldFromChildren(got, base)
+	if !parent.HasGap {
+		t.Fatal("the parent did not inherit the child's gap mark")
+	}
+	if parent.High != 120 || parent.Low != 90 || parent.Close != 92 || parent.Volume != 60 {
+		t.Fatalf("parent = H%v L%v C%v V%v, want H120 L90 C92 V60 (the rebuilt children, not the stale parent)",
+			parent.High, parent.Low, parent.Close, parent.Volume)
+	}
+}
+
 func TestCollectFoldChildren_ReportsMissingStartedChild(t *testing.T) {
 	t.Parallel()
 

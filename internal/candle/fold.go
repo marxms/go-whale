@@ -77,12 +77,17 @@ func FindByTimestamp(buf *RingBuffer[Candle], timestamp int64) *Candle {
 // the staleness the fold exists to end.
 //
 // A child whose bucket HAS started and is absent is missing DATA. Folding over it publishes a
-// bucket short by construction and labels it measured — the failure the fold exists to remove,
-// arriving dressed as an improvement.
+// bucket short by construction — the failure the fold exists to remove.
 //
 // So: every child that has already STARTED must be present; children still in the future are
 // simply not part of the parent yet. A missing interval proven to predate the symbol's listing is
 // skipped instead of blocking: the venue publishes no candle there either, so it can never arrive.
+//
+// A child that is present but MARKED gapped is a third case, and it must not block. Refusing to
+// fold it publishes the parent's PREVIOUS value: older than the gapped child and, worse, still
+// carrying HasGap=false, so a frozen bucket is served as clean. Rebuild from the children that
+// exist and let FoldFromChildren OR the mark into the parent. Fresh and marked beats stale and
+// clean.
 func CollectFoldChildren(buf *RingBuffer[Candle], childTF string, childCount int, parentTS, now, listingFloor int64) ([]Candle, bool) {
 	childMs := ParseTimeframeToSeconds(childTF) * 1000
 	if childMs <= 0 {
@@ -103,7 +108,13 @@ func CollectFoldChildren(buf *RingBuffer[Candle], childTF string, childCount int
 			// series began. Preserve the parent until the missing child is known.
 			return nil, false
 		}
-		if c.HasGap {
+		// A present child whose mark says ONLY its volume is short may be folded: the venue's
+		// kline frame carries its prices, and the parent inherits the mark through FoldFromChildren.
+		// Every other mark means the value itself is unproven — an authoritative REST record that
+		// erased a live measurement, waiting for a targeted re-read — and folding it would publish
+		// a provisional price as if it were settled. Unknown kinds are treated as provisional on
+		// purpose: a candle read back from storage cannot prove which case it is.
+		if c.HasGap && c.GapKind != GapVolumeIncomplete {
 			return nil, false
 		}
 		kids = append(kids, *c)
@@ -170,7 +181,11 @@ func FoldFromChildren(kids []Candle, parentTS int64) Candle {
 	// be marked, and its frame still carries a timestamp.
 	unknownSource := false
 	for _, k := range kids {
-		parent.HasGap = parent.HasGap || k.HasGap
+		// The CAUSE travels with the mark. The helper keeps the weaker of the two promises, so a
+		// parent whose only gapped child is volume-short stays foldable, while a provisional child
+		// makes the parent provisional too: the coarser level must not launder an unproven price
+		// into a settled one.
+		parent.HasGap, parent.GapKind = MergeGapMark(parent, k)
 		if k.Source == string(CandleMergeSourceRESTTotal) {
 			// A REST-derived child cannot become independent WS evidence.
 			parent.Source = string(CandleMergeSourceRESTTotal)

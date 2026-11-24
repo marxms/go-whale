@@ -30,6 +30,29 @@ type klineFeed interface {
 
 type klineFeedFactory func(context.Context, string, string, string, func(string, candle.Candle)) klineFeed
 
+// klineFeedHolder wraps the interface in a fixed concrete type for atomic.Value: tests store
+// different feed implementations, and atomic.Value requires one concrete type per Value.
+type klineFeedHolder struct{ feed klineFeed }
+
+// publishKlineSnapshotLocked publishes the probe state. Callers hold klineMu.
+func (a *App) publishKlineSnapshotLocked() {
+	a.klineFeedSnap.Store(klineFeedHolder{feed: a.klineFeed})
+	a.klineScopeSnap.Store(a.klineScope)
+	a.klineExhaustedSnap.Store(a.klineReconnectExhausted)
+}
+
+// klineHealthState returns the feed, scope and terminal flag WITHOUT ever blocking on klineMu.
+// If the lock is momentarily held (the normal case), the last published snapshot is used.
+func (a *App) klineHealthState() (feed klineFeed, scope string, exhausted bool) {
+	if a.klineMu.TryLock() {
+		defer a.klineMu.Unlock()
+		return a.klineFeed, a.klineScope, a.klineReconnectExhausted
+	}
+	holder, _ := a.klineFeedSnap.Load().(klineFeedHolder)
+	scope, _ = a.klineScopeSnap.Load().(string)
+	return holder.feed, scope, a.klineExhaustedSnap.Load()
+}
+
 type klineGapHeads map[engine.CompositeKey]int64
 
 func (heads klineGapHeads) GetLatestTimestamp(_ context.Context, exchangeID, marketType, symbol, tf string) (int64, bool) {
@@ -140,6 +163,7 @@ func (a *App) startKlineFeed(ctx context.Context, exchangeID, marketType string,
 	a.klineFeed = feed
 	a.klineScope = exchangeID + ":" + marketType
 	a.klineSymbols = appendMissing(nil, symbols)
+	a.publishKlineSnapshotLocked()
 	a.candleEngine.RegisterDerivedScope(exchangeID, marketType, binancesdk.KlineFeedInterval)
 	a.klineMu.Unlock()
 	a.startKlineWatchdog(ctx, exchangeID, marketType)
@@ -172,12 +196,30 @@ func (a *App) noteKlineHealthy() {
 	}
 	if a.klineBackoffPolicy().Stable(now.Sub(a.klineHealthySince)) {
 		a.klineFailures = 0
+		a.klineReconnectExhausted = false
+		a.publishKlineSnapshotLocked()
 	}
 }
 
+// Bounded redial for the kline feed. The 30s watchdog tick is the OBSERVATION cadence; the redial
+// itself backs off from 1s to 30s with full jitter and stops after a declared number of attempts,
+// so a persistent dial failure becomes a named terminal state instead of an endless loop.
+const (
+	klineReconnectBase = time.Second
+	klineReconnectCap  = 30 * time.Second
+	// Six attempts reach the cap (1+2+4+8+16+30 ≈ 61s of waiting). Past it the feed is terminal
+	// and an operator/supervisor decides; retrying forever at a fixed cadence is exactly the loop
+	// this bound removes.
+	klineMaxReconnectAttempts = 6
+)
+
 func (a *App) klineBackoffPolicy() binancews.Backoff {
 	if a.klineBackoff == (binancews.Backoff{}) {
-		return binancews.DefaultBackoff()
+		return binancews.Backoff{
+			Base:        klineReconnectBase,
+			Max:         klineReconnectCap,
+			StableAfter: 30 * time.Second,
+		}
 	}
 	return a.klineBackoff
 }
@@ -243,22 +285,56 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	}
 	silent, havePartitions := feed.SecondsSinceLastFrame()
 	restartNeeded := feed.NeedsRestart()
+	// A terminal transport fault names its partition immediately. Reading it before the healthy
+	// early-return is what lets the re-dial happen on the next 30s tick instead of waiting out
+	// the 60s silence limit, without touching a delivering sister.
+	var faultStat binancesdk.PartitionStat
+	var faultMembers []string
+	faulted := false
+	if faultedFeed, ok := feed.(faultedKlineFeed); ok && len(a.klinePendingAttach) == 0 {
+		faultStat, faultMembers, faulted = faultedFeed.FaultedPartition(binancesdk.KlineFaultRedialWindow)
+	}
 	if len(a.klineSymbols) == 0 && len(a.klinePendingAttach) == 0 && !restartNeeded {
 		return false
 	}
-	if havePartitions && silent < binancesdk.KlineSilenceLimitSeconds && !restartNeeded && len(a.klinePendingAttach) == 0 {
+	if havePartitions && silent < binancesdk.KlineSilenceLimitSeconds && !restartNeeded && !faulted && len(a.klinePendingAttach) == 0 {
 		a.noteKlineHealthy()
 		return false
 	}
 	now := time.Now()
+	if a.klineReconnectExhausted {
+		return true
+	}
 	if now.Before(a.klineNextAttempt) {
 		return false
+	}
+	if a.klineFailures >= klineMaxReconnectAttempts {
+		a.klineReconnectExhausted = true
+		a.publishKlineSnapshotLocked()
+		a.logger().Error("kline feed: reconnect exhausted; automatic redial stopped",
+			"attempts", a.klineFailures,
+			"exchange", exchangeID,
+			"market_type", marketType,
+			"symbols", len(a.klineSymbols)+len(a.klinePendingAttach))
+		return true
 	}
 	a.klineHealthySince = time.Time{}
 	//nolint:gosec // G404: reconnect jitter, not a cryptographic use.
 	delay := a.klineBackoffPolicy().Delay(a.klineFailures, rand.Float64())
 	a.klineFailures++
 	a.klineNextAttempt = now.Add(delay)
+
+	// Partition-scoped recovery first: when one partition is silent and a sister is delivering, the
+	// fault is the partition's, and restarting the fleet would close the healthy sister and mark
+	// symbols that never lost their producer.
+	if scoped, ok := feed.(partitionScopedKlineFeed); ok && !restartNeeded && len(a.klinePendingAttach) == 0 {
+		if faulted {
+			return a.restartKlinePartition(ctx, exchangeID, marketType, scoped, faultStat, faultMembers, "transport fault")
+		}
+		if stat, members, found := scoped.SilentPartition(binancesdk.KlineSilenceLimitSeconds); found {
+			return a.restartKlinePartition(ctx, exchangeID, marketType, scoped, stat, members, "silence")
+		}
+	}
 	switch {
 	case restartNeeded || len(a.klinePendingAttach) > 0:
 		a.logger().Error("kline feed: transport recovery required; restarting despite recent frames",
@@ -279,8 +355,12 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 
 	// Mark before Start can close the holed bucket with a frame from the next bucket.
 	if a.candleEngine != nil {
-		if marked := a.candleEngine.MarkOpenBucketGapped(exchangeID, marketType, binancesdk.KlineFeedInterval, fleet); marked > 0 {
-			a.logger().Warn("kline feed: open buckets marked incomplete across the restart hole", "buckets", marked)
+		marked := a.candleEngine.MarkOpenBucketGapped(exchangeID, marketType, binancesdk.KlineFeedInterval, fleet)
+		if len(marked) > 0 {
+			a.logger().Warn("kline feed: open buckets marked incomplete across the restart hole", "buckets", len(marked))
+			// The mark is applied under the engine lock, so the rebuild has to happen outside it.
+			// A closed parent receives no future frame to trigger the fold on its own.
+			a.candleEngine.RepairAncestors(exchangeID, marketType, binancesdk.KlineFeedInterval, marked)
 		}
 	}
 	a.reserveKlineGapHeads(ctx, exchangeID, marketType, fleet)
@@ -304,6 +384,7 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	a.klineFeed = fresh
 	a.klineSymbols = fleet
 	a.klinePendingAttach = nil
+	a.publishKlineSnapshotLocked()
 
 	// THE HOLE THE RESTART JUST LEFT, HEALED THE WAY THE PROCESS RESTART ALREADY HEALS ITS OWN.
 	//
@@ -327,6 +408,61 @@ func (a *App) restartKlineFeedIfSilent(ctx context.Context, exchangeID, marketTy
 	}
 	a.klineGapHeads = nil
 	return false
+}
+
+// partitionScopedKlineFeed is the optional capability a feed may offer; a test fake need not.
+type partitionScopedKlineFeed interface {
+	SilentPartition(float64) (binancesdk.PartitionStat, []string, bool)
+	RestartPartition(int) error
+}
+
+// faultedKlineFeed is the optional capability for reacting to a terminal transport error. It is
+// separate so an older fake remains a valid partition-scoped feed.
+type faultedKlineFeed interface {
+	FaultedPartition(float64) (binancesdk.PartitionStat, []string, bool)
+}
+
+// restartKlinePartition heals one silent partition without touching the fleet. The mark is scoped
+// to that partition's members: they are the only symbols whose producer disappeared.
+func (a *App) restartKlinePartition(
+	ctx context.Context,
+	exchangeID, marketType string,
+	scoped partitionScopedKlineFeed,
+	stat binancesdk.PartitionStat,
+	members []string,
+	cause string,
+) bool {
+	a.logger().Error("kline feed: one partition is not delivering; restarting ONLY that partition",
+		"partition", stat.ID,
+		"symbols", len(members),
+		"silent_seconds", stat.LastFrameAge.Seconds(),
+		"cause", cause,
+		"exchange", exchangeID,
+		"market_type", marketType)
+
+	// Mark before the redial can close the holed bucket with a frame from the next bucket.
+	if a.candleEngine != nil {
+		marked := a.candleEngine.MarkOpenBucketGapped(exchangeID, marketType, binancesdk.KlineFeedInterval, members)
+		if len(marked) > 0 {
+			a.logger().Warn("kline feed: open buckets marked incomplete across the partition restart hole",
+				"buckets", len(marked), "partition", stat.ID)
+			// The mark is applied under the engine lock, so the rebuild happens outside it.
+			a.candleEngine.RepairAncestors(exchangeID, marketType, binancesdk.KlineFeedInterval, marked)
+		}
+	}
+	// Heads stay complete for the whole fleet; only the affected members are enqueued below, so a
+	// sister's pending heads are not dropped by this repair.
+	a.reserveKlineGapHeads(ctx, exchangeID, marketType, a.klineSymbols)
+
+	if err := scoped.RestartPartition(stat.ID); err != nil {
+		a.logger().Error("kline feed: partition restart failed; the scope keeps its other partitions",
+			"partition", stat.ID, "error", err)
+		return a.streamCtx != nil && a.streamCtx.Err() != nil
+	}
+	if a.gapRecovery != nil {
+		recovery.EnqueueBootGap(ctx, a.gapRecovery, a.klineGapHeads, exchangeID, marketType, members, time.Now())
+	}
+	return a.streamCtx != nil && a.streamCtx.Err() != nil
 }
 
 // extendKlineFeed brings symbols found by periodic discovery under the venue's ownership.

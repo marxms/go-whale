@@ -8,6 +8,7 @@ import (
 	prommetrics "github.com/marxms/go-whale/internal/adapters/outbound/prometheus"
 	"github.com/marxms/go-whale/internal/candle"
 	"github.com/marxms/go-whale/internal/derivatives"
+	"github.com/marxms/go-whale/internal/health"
 	"github.com/marxms/go-whale/internal/market"
 	"github.com/marxms/go-whale/internal/platform/config"
 )
@@ -17,6 +18,36 @@ func (a *App) buildHTTP(cfg config.Config, tfReg *candle.TimeframeRegistry, metr
 	a.metricsCollector = httpapi.NewMetricsCollector(a.manager, a.log)
 	a.metricsCollector.SetGaugeSink(metricsProvider.HealthSink())
 	a.metricsCollector.SetTimeframeRegistry(tfReg)
+	// One row per feed partition: the row is what distinguishes a silent partition from a dead
+	// fleet without reading the process's sockets.
+	a.metricsCollector.SetPartitions(a.partitionHealth)
+	a.metricsCollector.SetFeedReconnectExhausted(a.klineReconnectExhaustedProbe)
+
+	// The per-TIMEFRAME data age. Without it a derived timeframe can freeze under a live 5m while
+	// /health keeps saying healthy.
+	if a.candleEngine != nil {
+		engine := a.candleEngine
+		exchange, marketType := a.defaultExchange, a.defaultMarketType
+		timeframes := cfg.CandleEngine.Timeframes
+		a.metricsCollector.SetTimeframeFreshness(func() ([]health.TimeframeFreshness, bool) {
+			if len(timeframes) == 0 {
+				return nil, false
+			}
+			nowMs := time.Now().UnixMilli()
+			rows := engine.TimeframeFreshness(exchange, marketType, timeframes, nowMs)
+			out := make([]health.TimeframeFreshness, 0, len(rows))
+			for _, row := range rows {
+				out = append(out, health.TimeframeFreshness{
+					Scope:        row.Scope,
+					Timeframe:    row.Timeframe,
+					NewestAgeMs:  row.NewestAgeMs,
+					HaveData:     row.HaveData,
+					StaleAfterMs: timeframeFreezeThreshold(row.Timeframe),
+				})
+			}
+			return out, true
+		})
+	}
 
 	// Give /health its one INTEGRITY assertion: the age of the last successful cold-tier
 	// commit. When QuestDB is disabled or failed to init, qdbStore is nil and the probe
@@ -61,6 +92,19 @@ func (a *App) buildHTTP(cfg config.Config, tfReg *candle.TimeframeRegistry, metr
 		configuredCoverage[scope] += market.DeclaredSymbolCount(exCfg.Discovery.Enabled, exCfg.Discovery.MaxAssets, len(exCfg.Symbols))
 	}
 	a.metricsCollector.SetConfiguredCoverage(configuredCoverage)
+}
+
+// timeframeFreezeThreshold is how old a timeframe's newest bucket may get before /health calls it
+// frozen: four intervals, floored at ten minutes so a single missed 5m boundary is not an alarm.
+func timeframeFreezeThreshold(tf string) int64 {
+	ms, ok := candle.ParseTimeframeMs(tf)
+	if !ok || ms <= 0 {
+		return 0
+	}
+	if threshold := 4 * ms; threshold > 10*60*1000 {
+		return threshold
+	}
+	return 10 * 60 * 1000
 }
 
 // newHTTPRouter assembles the production router.

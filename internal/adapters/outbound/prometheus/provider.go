@@ -8,12 +8,14 @@ import (
 	"math"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/marxms/go-whale/internal/adapters/inbound/realtime"
 	binancesdk "github.com/marxms/go-whale/internal/adapters/outbound/binance"
+	"github.com/marxms/go-whale/internal/adapters/outbound/bingx"
 	"github.com/marxms/go-whale/internal/adapters/outbound/questdb"
 	redisstore "github.com/marxms/go-whale/internal/adapters/outbound/redis"
 	"github.com/marxms/go-whale/internal/adapters/outbound/venue"
@@ -42,16 +44,19 @@ const (
 	labelReason     = "reason"
 	labelSymbol     = "symbol"
 	labelOutcome    = "outcome"
+	labelViolation  = "violation"
 	labelTimeframe  = "timeframe"
 	labelFeed       = "feed"
 	labelMarket     = "market"
 	labelCapability = "capability"
+	labelChannel    = "channel"
 )
 
 // Provider holds every registered collector and exposes the owning-package ports.
 type Provider struct {
 	streaming   streaming.Metrics
 	binance     binancesdk.Metrics
+	bingx       bingx.Metrics
 	realtime    realtime.Metrics
 	venue       venue.Metrics
 	questdb     questdb.Metrics
@@ -191,6 +196,11 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Name: "trades_dropped_total",
 		Help: "Trades LOST by exchange and market type (parse failure, callback panic, or an append refused by a full buffer). Excludes trades that were stored.",
 	}, []string{labelExchange, labelMarketType})
+	tradesDroppedClassified := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_dropped_classified_total",
+		Help: "Trades LOST locally with the reason, symbol and real connection partition, for every venue. Its delta sums to the venue's legacy aggregate; a drop without a location is unmeasured.",
+	}, []string{labelExchange, labelMarketType, labelSymbol, "partition", labelReason})
 	tradesIngested := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespaceGowhale, Subsystem: subsystemBinanceSDK,
 		Name: "trades_ingested_total",
@@ -257,6 +267,9 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		HealthState:                   func(ex, mt string, state float64) { healthState.WithLabelValues(ex, mt).Set(state) },
 		MessagesInTotal:               func(ex, mt string) { messagesIn.WithLabelValues(ex, mt).Inc() },
 		TradesDroppedTotal:            func(ex, mt string) { tradesDropped.WithLabelValues(ex, mt).Inc() },
+		TradesDroppedClassified: func(ex, mt, symbol string, partition int, reason string) {
+			tradesDroppedClassified.WithLabelValues(ex, mt, symbol, strconv.Itoa(partition), reason).Inc()
+		},
 		TradesIngestedTotal:           func(ex, mt string) { tradesIngested.WithLabelValues(ex, mt).Inc() },
 		ReconnectSignalsDropped:       func(ex, mt string) { reconnectSignalsDropped.WithLabelValues(ex, mt).Inc() },
 		ResubscribeIncompleteTotal:    func(ex, mt string, n float64) { resubscribeIncomplete.WithLabelValues(ex, mt).Add(n) },
@@ -282,13 +295,31 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		},
 	}
 
+	p.bingx = bingx.Metrics{
+		TradesDroppedClassified: func(ex, mt, symbol string, partition int, reason string) {
+			tradesDroppedClassified.WithLabelValues(ex, mt, symbol, strconv.Itoa(partition), reason).Inc()
+		},
+	}
+
 	// Realtime.
 	realtimeDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "realtime_publish_dropped_total",
 		Help: "Realtime events discarded because the outbound queue was full, by channel. >0 means the bus could not keep up and subscribers will detect a sequence gap and rehydrate.",
-	}, []string{"channel"})
+	}, []string{labelChannel})
+	realtimeQueueDepth := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "realtime_queue_depth",
+		Help: "Events waiting in the outbound queue, by channel. A rising depth is the bus falling behind; it is not a drop yet.",
+	}, []string{labelChannel})
+	realtimeOldestPendingAge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "realtime_oldest_pending_age_seconds",
+		Help: "Age of the oldest event still pending in the outbound queue, by channel. It updates on traffic and is an upper bound when the head was just consumed.",
+	}, []string{labelChannel})
 	p.realtime = realtime.Metrics{
-		PublishDropped: func(channel string) { realtimeDropped.WithLabelValues(channel).Inc() },
+		PublishDropped:    func(channel string) { realtimeDropped.WithLabelValues(channel).Inc() },
+		PublishQueueDepth: func(channel string, depth int) { realtimeQueueDepth.WithLabelValues(channel).Set(float64(depth)) },
+		PublishOldestPendingAge: func(channel string, age time.Duration) {
+			realtimeOldestPendingAge.WithLabelValues(channel).Set(age.Seconds())
+		},
 	}
 
 	// Coverage gauges updated by the health aggregation.
@@ -340,6 +371,30 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 	coldSeedNoopRows := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "cold_seed_noop_rows_total", Help: "Seed/backfill rows whose complete physical cold write was already applied before this sweep; this is not a WAL acknowledgement for other rows.",
 	})
+	coldPipelineDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cold_pipeline_dropped_total", Help: "Closed candles refused by the non-blocking cold pipeline, by exchange and market type. >0 means the cold copy is behind and the bar was marked cold_pending.",
+	}, []string{labelExchange, labelMarketType})
+	coldPendingDepth := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cold_pending_depth", Help: "Bars marked cold_pending by refused cold writes, by exchange and market type.",
+	}, []string{labelExchange, labelMarketType})
+	coldDurableFalse := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cold_durable_false_total", Help: "ColdDurable checks that found the bar not readable from the cold after the apply barrier, by exchange and market type.",
+	}, []string{labelExchange, labelMarketType})
+	hotWriterDepth := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hot_writer_depth", Help: "Closed-bucket snapshots pending or in flight in the single-owner hot write-behind queue.",
+	})
+	hotWriterOldestPending := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hot_writer_oldest_pending_seconds", Help: "Age of the oldest closed-bucket snapshot still waiting for the hot tier. Climbs while Redis is slow or failing.",
+	})
+	hotWriterDropped := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hot_writer_dropped_total", Help: "Closed-bucket snapshots refused by the bounded hot writer queue (first drop also logged).",
+	})
+	hotWriterFailed := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hot_writer_failed_total", Help: "Hot writer flushes that failed; the batch returns to the queue and is retried.",
+	})
+	hotWriterCoalesced := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hot_writer_coalesced_total", Help: "Closed-bucket snapshots replaced by a newer snapshot of the SAME series and bar.",
+	})
 	coldFlushAge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "cold_last_flush_age_seconds",
 		Help: "Seconds since the cold tier (QuestDB) last COMMITTED a batch. Climbs when writes are failing or when no closed candles are being produced; NaN when no cold store is configured. This is the signal that was absent during the 13h silent cold-write outage.",
@@ -349,6 +404,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		ColdPipelineBlocked:     func(v float64) { coldPipelineBlocked.Set(v) },
 		ColdPipelinePendingRows: func(v float64) { coldPipelinePendingRows.Set(v) },
 		ColdSeedNoopRows:        func(n float64) { coldSeedNoopRows.Add(n) },
+		ColdPipelineDropped:     func(ex, mt string) { coldPipelineDropped.WithLabelValues(ex, mt).Inc() },
 	}
 
 	// Redis derivatives.
@@ -448,6 +504,10 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Name: "cold_append_aborted_total",
 		Help: "Seed/backfill cold-tier appends aborted mid-batch (ctx-cancel / pipeline shutdown), leaving post-abort candles unwritten to cold. The batch error is surfaced for retry.",
 	})
+	sanityViolation := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "candle_sanity_violation_total",
+		Help: "Folded candles that contradicted their own children, by violation. violation=ohlc_order (high<low, or open/close outside the range), violation=high_below_children, violation=low_above_children, violation=volume_mismatch (a bucket declaring itself complete is not the sum of its children). The bar is still published, marked provisional: refusing the write would re-freeze the bucket, which is the defect this check surfaces.",
+	}, []string{labelExchange, labelMarketType, labelTimeframe, labelViolation})
 
 	p.engine = engine.Metrics{
 		WarmSeedTotal:                 func(ex, mt, tf, outcome string) { warmSeed.WithLabelValues(ex, mt, tf, outcome).Inc() },
@@ -461,6 +521,7 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		SeedRepairEvicted:             func() { seedRepairEvicted.Inc() },
 		SeedRepairOutsideRetention:    func() { seedRepairOutsideRetention.Inc() },
 		ColdAppendAborted:             func() { coldAppendAborted.Inc() },
+		CandleSanityViolationTotal:    func(ex, mt, tf, violation string) { sanityViolation.WithLabelValues(ex, mt, tf, violation).Inc() },
 		ColdMissingBuckets:            func(ex, mt, tf string, v float64) { coldMissingBuckets.WithLabelValues(ex, mt, tf).Set(v) },
 		ColdSymbolsWithGaps:           func(ex, mt, tf string, v float64) { coldSymbolsWithGaps.WithLabelValues(ex, mt, tf).Set(v) },
 		ColdSymbolsExpected:           func(ex, mt, tf string, v float64) { coldSymbolsExpected.WithLabelValues(ex, mt, tf).Set(v) },
@@ -471,6 +532,13 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		DurableTimeframeCovered:       func(tf string, v float64) { durableTimeframeCovered.WithLabelValues(tf).Set(v) },
 		DurableIncoherentFunding:      func(tf string, v float64) { durableIncoherentFunding.WithLabelValues(tf).Set(v) },
 		DurableDimensionsMeasured:     func(v float64) { durableDimensionsMeasured.Set(v) },
+		ColdPendingDepth:              func(ex, mt string, v float64) { coldPendingDepth.WithLabelValues(ex, mt).Set(v) },
+		ColdDurableFalse:              func(ex, mt string) { coldDurableFalse.WithLabelValues(ex, mt).Inc() },
+		HotWriterDepth:                func(v float64) { hotWriterDepth.Set(v) },
+		HotWriterOldestPending:        func(seconds float64) { hotWriterOldestPending.Set(seconds) },
+		HotWriterDropped:              func() { hotWriterDropped.Inc() },
+		HotWriterFailed:               func() { hotWriterFailed.Inc() },
+		HotWriterCoalesced:            func() { hotWriterCoalesced.Inc() },
 	}
 
 	// Derivatives collector.
@@ -606,6 +674,43 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		Help: "Sum of the base-asset quantity of every trade admitted into the aggregator. Compare against engine_applied_delta_volume_total for the same scope: equal means the shortfall is upstream of this process, greater means it is ours.",
 	}, []string{labelExchange, labelMarketType})
 
+	tradesBufferFill := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_buffer_fill",
+		Help: "Trades currently held by a symbol buffer, sampled every 500 ms. Not on the ingest hot path.",
+	}, []string{labelExchange, labelMarketType, labelSymbol})
+	tradesBufferMaxFill := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_buffer_max_fill",
+		Help: "High-water mark of a symbol buffer since the client was created. A drained buffer keeps the evidence of its burst.",
+	}, []string{labelExchange, labelMarketType, labelSymbol})
+	tradesBufferCapacity := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_buffer_capacity",
+		Help: "Resolved per-symbol capacity the buffer refuses at (the configured cap or its fallback).",
+	}, []string{labelExchange, labelMarketType, labelSymbol})
+	tradesBufferLastDrainAge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "trades_buffer_last_drain_age_seconds",
+		Help: "Seconds since this symbol's buffer last emptied. A rising value with a non-zero fill is a stalled drain, not an idle market.",
+	}, []string{labelExchange, labelMarketType, labelSymbol})
+
+	workerBusySeconds := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "worker_busy_seconds_total",
+		Help: "Aggregate time workers spent draining symbol buffers. Paired with queue/in-flight it separates a fast worker on an empty queue from a saturated pool.",
+	})
+	workerQueueDepth := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "worker_queue_depth",
+		Help: "Symbols waiting in the processing queue at sample time.",
+	})
+	workerInFlight := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespaceGowhale, Subsystem: subsystemStream,
+		Name: "worker_in_flight",
+		Help: "Workers currently draining a symbol at sample time.",
+	})
+
 	p.ingestion = ingestion.Metrics{
 		TradesDiscarded:   func(ex, mt, reason string) { tradesDiscarded.WithLabelValues(ex, mt, reason).Inc() },
 		TradesMissing:     func(ex, mt string, n float64) { tradesMissing.WithLabelValues(ex, mt).Add(n) },
@@ -617,6 +722,24 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		PreregisterMissing:  func(ex, mt string) { tradesMissing.WithLabelValues(ex, mt) },
 		PreregisterAdmitted: func(ex, mt string) { admittedVolume.WithLabelValues(ex, mt) },
 		ForgetAdmitted:      func(ex, mt string) { admittedVolume.DeleteLabelValues(ex, mt) },
+		SetTradesBuffer: func(ex, mt, symbol string, current, max, capacity int, lastDrainAgeSeconds float64) {
+			tradesBufferFill.WithLabelValues(ex, mt, symbol).Set(float64(current))
+			tradesBufferMaxFill.WithLabelValues(ex, mt, symbol).Set(float64(max))
+			tradesBufferCapacity.WithLabelValues(ex, mt, symbol).Set(float64(capacity))
+			tradesBufferLastDrainAge.WithLabelValues(ex, mt, symbol).Set(lastDrainAgeSeconds)
+		},
+		DeleteTradesBuffer: func(ex, mt, symbol string) {
+			labels := prometheus.Labels{labelExchange: ex, labelMarketType: mt, labelSymbol: symbol}
+			tradesBufferFill.DeletePartialMatch(labels)
+			tradesBufferMaxFill.DeletePartialMatch(labels)
+			tradesBufferCapacity.DeletePartialMatch(labels)
+			tradesBufferLastDrainAge.DeletePartialMatch(labels)
+		},
+		AddWorkerBusy: func(seconds float64) { workerBusySeconds.Add(seconds) },
+		SetWorkerQueue: func(queued, inFlight int) {
+			workerQueueDepth.Set(float64(queued))
+			workerInFlight.Set(float64(inFlight))
+		},
 	}
 
 	// Netdiag.
@@ -730,23 +853,25 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		// ── Binance ──────────────────────────────────────────────────────
 		goroutinesTotal, reconnectAttempts, reconnectFailures, disconnectCause,
 		lastMessageAge, partitionStale, healthState, messagesIn, tradesDropped,
-		tradesIngested, reconnectSignalsDropped, resubscribeIncomplete,
+		tradesDroppedClassified, tradesIngested, reconnectSignalsDropped, resubscribeIncomplete,
 		resubscribeUnverified, dynamicSubscribeDeferred, starvationSuppressed,
 		klineFramesTotal, klineFramesRejected, klineSymbolsAttached, klinePartitionFrames, klineRoute,
 		// ── Realtime ─────────────────────────────────────────────────────
-		realtimeDropped,
+		realtimeDropped, realtimeQueueDepth, realtimeOldestPendingAge,
 		// ── Coverage ──────────────────────────────────────────────────────
 		symbolsConfigured, symbolsEffective,
 		// ── Derivatives adapters ──────────────────────────────────────────
 		lsrShareSumViolation, capabilityAbsent, derivativesColdDegraded, coldPipelineBlocked,
-		coldPipelinePendingRows, coldSeedNoopRows, coldFlushAge, seriesNonFinite,
+		coldPipelinePendingRows, coldSeedNoopRows, coldFlushAge, coldPipelineDropped,
+		coldPendingDepth, coldDurableFalse, seriesNonFinite,
+		hotWriterDepth, hotWriterOldestPending, hotWriterDropped, hotWriterFailed, hotWriterCoalesced,
 		// ── Candle engine ─────────────────────────────────────────────────
 		warmSeed, deltaInsideHorizon, appliedDeltaVolume, coldMissingBuckets,
 		coldSymbolsWithGaps, coldSymbolsExpected, coldSymbolsAbsent, durableRows,
 		durableMissingBuckets, durableColumnCovered, durableTimeframeCovered,
 		durableIncoherentFunding, durableDimensionsMeasured, foldSeedRevisions,
 		lateUpdate, seedMerge, seedRepairEvicted, seedRepairOutsideRetention,
-		coldAppendAborted,
+		coldAppendAborted, sanityViolation,
 		// ── Derivatives collector ─────────────────────────────────────────
 		feedAvailable, feedRequest, collectedPoints, collectedSpan, historyPages,
 		fundingIntervalComparison, fundingIntervalMeasurement, fundingProfileEntries,
@@ -756,6 +881,8 @@ func New(reg prometheus.Registerer) (*Provider, error) {
 		redisOccupancy, redisKeysWithoutTTL, redisKeysTotal, redisEvictedKeys, redisAlert,
 		// ── Ingestion ─────────────────────────────────────────────────────
 		tradesDiscarded, tradesMissing, tradesMissingTail, admittedVolume,
+		tradesBufferFill, tradesBufferMaxFill, tradesBufferCapacity, tradesBufferLastDrainAge,
+		workerBusySeconds, workerQueueDepth, workerInFlight,
 		// ── Netdiag ───────────────────────────────────────────────────────
 		reconnectScope,
 		// ── Recovery ──────────────────────────────────────────────────────
@@ -789,6 +916,9 @@ func (p *Provider) Streaming() streaming.Metrics { return p.streaming }
 
 // Binance returns the Binance adapter metrics port.
 func (p *Provider) Binance() binancesdk.Metrics { return p.binance }
+
+// BingX returns the BingX adapter drop-observability port.
+func (p *Provider) BingX() bingx.Metrics { return p.bingx }
 
 // Realtime returns the realtime edge metrics port.
 func (p *Provider) Realtime() realtime.Metrics { return p.realtime }

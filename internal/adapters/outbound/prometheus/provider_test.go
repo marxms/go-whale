@@ -139,6 +139,7 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 		"gowhale_binancesdk_last_message_age_seconds", "gowhale_binancesdk_partition_stale_fraction",
 		"gowhale_binancesdk_health_state", "gowhale_binancesdk_messages_in_total",
 		"gowhale_binancesdk_trades_dropped_total", "gowhale_binancesdk_trades_ingested_total",
+		"gowhale_stream_trades_dropped_classified_total",
 		"gowhale_binancesdk_reconnect_signals_dropped_total", "gowhale_binancesdk_resubscribe_incomplete_total",
 		"gowhale_binancesdk_resubscribe_unverified_total", "gowhale_binancesdk_dynamic_subscribe_deferred_total",
 		"gowhale_binancesdk_starvation_suppressed_reconnect_total",
@@ -162,6 +163,7 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 		"candle_seed_ancestor_revisions_unconfirmed_total", "candle_late_update_total",
 		"candle_seed_merge_total", "candle_seed_ancestor_unadmitted_evicted_series_total",
 		"candle_seed_ancestor_outside_cold_retention_total", "cold_append_aborted_total",
+		"candle_sanity_violation_total",
 		// derivatives collector
 		"gowhale_derivatives_feed_available", "gowhale_derivatives_feed_request_total",
 		"gowhale_derivatives_collected_points", "gowhale_derivatives_collected_span_seconds",
@@ -177,6 +179,11 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 		// ingestion
 		"trades_discarded_total", "trades_missing_total", "trades_missing_tail_total",
 		"stream_admitted_volume_total",
+		"gowhale_stream_trades_buffer_fill", "gowhale_stream_trades_buffer_max_fill",
+		"gowhale_stream_trades_buffer_capacity",
+		"gowhale_stream_trades_buffer_last_drain_age_seconds",
+		"gowhale_stream_worker_busy_seconds_total", "gowhale_stream_worker_queue_depth",
+		"gowhale_stream_worker_in_flight",
 		// netdiag
 		"gowhale_netdiag_reconnect_scope_total",
 		// recovery
@@ -201,8 +208,8 @@ func TestNew_DefinesTheWholeMetricInventory(t *testing.T) {
 			t.Errorf("%s is missing from the exposition — the metric was renamed, dropped or never registered", name)
 		}
 	}
-	if len(expected) != 90 {
-		t.Fatalf("inventory has %d names, want the 90 definitions T44 moved", len(expected))
+	if len(expected) != 99 {
+		t.Fatalf("inventory has %d names, want the 99 definitions T44 moved", len(expected))
 	}
 	// The histogram bucket boundaries are part of the wire contract.
 	assertBuckets(t, reg, "gowhale_coinalyze_cycle_duration_seconds", []float64{30, 60, 120, 240, 480, 960, 1920, 3840, 7680, 15360})

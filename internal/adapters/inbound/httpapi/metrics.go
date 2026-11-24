@@ -36,8 +36,19 @@ type MetricsCollector struct {
 	// a probe that otherwise measures transport only. See SetColdWriteFreshness.
 	coldFreshness coldFreshnessHolder
 	gaugeSink     atomic.Value // stores health.GaugeSink
-	aggregator    *health.Aggregator
-	log           *slog.Logger
+	// timeframeFreshness stores func() ([]health.TimeframeFreshness, bool): the only probe that
+	// can see a DERIVED timeframe freeze while the scope-level aggregate looks live.
+	timeframeFreshness atomic.Value
+	// partitions stores func() ([]health.PartitionHealth, bool): one row per feed partition,
+	// so a silent partition is visible without reading the process's sockets.
+	partitions atomic.Value
+	// silentPartitions stores []health.SilentPartitionReport: the partitions above the
+	// declared silent fraction. Non-empty makes /health unhealthy after the grace.
+	silentPartitions atomic.Value
+	// feedReconnectExhausted stores func() (bool, bool): the bounded redial gave up.
+	feedReconnectExhausted atomic.Value
+	aggregator             *health.Aggregator
+	log                    *slog.Logger
 }
 
 // fleetLivenessSnapshot is the ONE atomic record the sampler publishes. The failing
@@ -76,6 +87,31 @@ func NewMetricsCollector(hybridManager HybridManagerStats, logs ...*slog.Logger)
 		FeedProducers: func() ([]health.FeedProducerReport, bool) {
 			v, ok := mc.feedProducers.Load().([]health.FeedProducerReport)
 			return v, ok
+		},
+		Partitions: func() ([]health.PartitionHealth, bool) {
+			probe, _ := mc.partitions.Load().(func() ([]health.PartitionHealth, bool))
+			if probe == nil {
+				return nil, false
+			}
+			return probe()
+		},
+		SilentPartitions: func() ([]health.SilentPartitionReport, bool) {
+			rows, ok := mc.silentPartitions.Load().([]health.SilentPartitionReport)
+			return rows, ok
+		},
+		FeedReconnectExhausted: func() (bool, bool) {
+			probe, _ := mc.feedReconnectExhausted.Load().(func() (bool, bool))
+			if probe == nil {
+				return false, false
+			}
+			return probe()
+		},
+		TimeframeFreshness: func() ([]health.TimeframeFreshness, bool) {
+			probe, _ := mc.timeframeFreshness.Load().(func() ([]health.TimeframeFreshness, bool))
+			if probe == nil {
+				return nil, false
+			}
+			return probe()
 		},
 		ConfiguredCoverage: mc.coverage.Snapshot,
 		ColdWrite:          mc.coldWriteProbe,
@@ -141,6 +177,14 @@ func (mc *MetricsCollector) SetDerivativesPollerFlag(flag *health.PollerHealth) 
 	mc.derivPollerAlive = flag
 }
 
+// SetTimeframeFreshness mounts the per-timeframe data-age probe. The producer must supply the
+// freeze threshold with each row: only it knows how long that interval may legitimately stay open.
+func (mc *MetricsCollector) SetTimeframeFreshness(probe func() ([]health.TimeframeFreshness, bool)) {
+	if probe != nil {
+		mc.timeframeFreshness.Store(probe)
+	}
+}
+
 // SetTimeframeRegistry sets the timeframe registry for health checksum.
 func (mc *MetricsCollector) SetTimeframeRegistry(tfReg *candle.TimeframeRegistry) {
 	mc.tfReg = tfReg
@@ -165,6 +209,24 @@ func (mc *MetricsCollector) SetFeedProducers(reports []health.FeedProducerReport
 	mc.feedProducers.Store(append([]health.FeedProducerReport(nil), reports...))
 }
 
+// SetPartitions publishes the live feed partitions. Observational: the verdict over a
+// silent fraction belongs to fleet liveness, so this setter never decides the HTTP status.
+func (mc *MetricsCollector) SetPartitions(probe func() ([]health.PartitionHealth, bool)) {
+	mc.partitions.Store(probe)
+}
+
+// SetSilentPartitions publishes the partitions above the declared silent fraction. An empty
+// slice is a healthy sample; a nil probe is "not configured" and never a passed check.
+func (mc *MetricsCollector) SetSilentPartitions(rows []health.SilentPartitionReport) {
+	mc.silentPartitions.Store(append([]health.SilentPartitionReport(nil), rows...))
+}
+
+// SetFeedReconnectExhausted publishes whether the bounded redial stopped. A feed with no
+// producer makes /health unhealthy after the grace.
+func (mc *MetricsCollector) SetFeedReconnectExhausted(probe func() (bool, bool)) {
+	mc.feedReconnectExhausted.Store(probe)
+}
+
 // SetExpectedScopes declares the exchange:market_type scopes that MUST have a
 // healthy connected stream once the startup grace period has elapsed. Scopes
 // are canonicalized via market.FromConfig so callers may pass raw config market
@@ -185,19 +247,26 @@ func (mc *MetricsCollector) SetExpectedScopes(scopes []string) {
 
 // HealthResponse is the JSON response for /health.
 type HealthResponse struct {
-	Status            string                    `json:"status"` // "healthy", "degraded", "unhealthy", "starting"
-	Uptime            string                    `json:"uptime"`
-	Goroutines        int                       `json:"goroutines"`
-	Connections       []ConnectionHealthSummary `json:"connections,omitempty"`
-	DerivativesPoller bool                      `json:"derivatives_poller"` // true if the poller goroutine is alive
-	TimeframeChecksum string                    `json:"timeframe_checksum,omitempty"`
-	MissingScopes     []string                  `json:"missing_scopes,omitempty"`    // expected scopes with no healthy connected stream (post-grace)
-	StaleScopes       []string                  `json:"stale_scopes,omitempty"`      // scopes connected but with most symbols frozen (per-symbol liveness, post-grace)
-	CoverageDeficits  []string                  `json:"coverage_deficits,omitempty"` // scopes streaming fewer symbols than configured, as "scope: effective/configured"`
+	Status           string                         `json:"status"` // "healthy", "degraded", "unhealthy", "starting"
+	Uptime           string                         `json:"uptime"`
+	Goroutines       int                            `json:"goroutines"`
+	Connections      []ConnectionHealthSummary      `json:"connections,omitempty"`
+	Partitions       []health.PartitionHealth       `json:"partitions,omitempty"`
+	SilentPartitions []health.SilentPartitionReport `json:"silent_partitions,omitempty"`
+	// FeedReconnectExhausted is true when automatic redial gave up: the scope has no producer.
+	FeedReconnectExhausted bool     `json:"feed_reconnect_exhausted,omitempty"`
+	DerivativesPoller      bool     `json:"derivatives_poller"` // true if the poller goroutine is alive
+	TimeframeChecksum      string   `json:"timeframe_checksum,omitempty"`
+	MissingScopes          []string `json:"missing_scopes,omitempty"`    // expected scopes with no healthy connected stream (post-grace)
+	StaleScopes            []string `json:"stale_scopes,omitempty"`      // scopes connected but with most symbols frozen (per-symbol liveness, post-grace)
+	CoverageDeficits       []string `json:"coverage_deficits,omitempty"` // scopes streaming fewer symbols than configured, as "scope: effective/configured"`
 	// CandleFreshness is the per-scope detail behind stale_scopes: newest readable age,
 	// monitored symbols and stale symbols. Additive; every field above keeps its name,
 	// shape and omitempty behavior.
 	CandleFreshness []health.CandleFreshnessReport `json:"candle_freshness,omitempty"`
+	// TimeframeFreshness is the per-TIMEFRAME data age. candle_freshness aggregates by scope, so a
+	// derived timeframe can freeze under a live 5m without moving it.
+	TimeframeFreshness []health.TimeframeFreshnessReport `json:"timeframe_freshness,omitempty"`
 
 	// ColdWriteAgeSeconds is the age of the last successful commit to the durable tier.
 	// Every other field on this response answers "is data arriving?"; this one answers "is it
@@ -253,21 +322,25 @@ func (mc *MetricsCollector) Health(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	resp := HealthResponse{
-		Status:              report.Status,
-		Uptime:              report.Uptime,
-		Goroutines:          report.Goroutines,
-		Connections:         summaries,
-		DerivativesPoller:   report.DerivativesPoller,
-		TimeframeChecksum:   report.TimeframeChecksum,
-		MissingScopes:       report.MissingScopes,
-		StaleScopes:         report.StaleScopes,
-		CandleFreshness:     report.CandleFreshness,
-		CoverageDeficits:    report.CoverageDeficits,
-		ColdWriteAgeSeconds: report.ColdWriteAgeSeconds,
-		ColdWriteStale:      report.ColdWriteStale,
-		GCHeadroomRatio:     report.GCHeadroomRatio,
-		GCHeadroomTight:     report.GCHeadroomTight,
-		Components:          report.Components,
+		Status:                 report.Status,
+		Uptime:                 report.Uptime,
+		Goroutines:             report.Goroutines,
+		Connections:            summaries,
+		Partitions:             report.Partitions,
+		SilentPartitions:       report.SilentPartitions,
+		FeedReconnectExhausted: report.FeedReconnectExhausted,
+		DerivativesPoller:      report.DerivativesPoller,
+		TimeframeChecksum:      report.TimeframeChecksum,
+		MissingScopes:          report.MissingScopes,
+		StaleScopes:            report.StaleScopes,
+		CandleFreshness:        report.CandleFreshness,
+		TimeframeFreshness:     report.TimeframeFreshness,
+		CoverageDeficits:       report.CoverageDeficits,
+		ColdWriteAgeSeconds:    report.ColdWriteAgeSeconds,
+		ColdWriteStale:         report.ColdWriteStale,
+		GCHeadroomRatio:        report.GCHeadroomRatio,
+		GCHeadroomTight:        report.GCHeadroomTight,
+		Components:             report.Components,
 	}
 
 	writeJSON(mc.log, w, report.HTTPStatus, resp)

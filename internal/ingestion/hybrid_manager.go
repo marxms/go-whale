@@ -45,6 +45,7 @@ type HybridClientState struct {
 // HybridManager manages streaming through native WebSocket clients.
 type HybridManager struct {
 	handler       TradeHandler
+	metrics       Metrics
 	limitsByRoute map[string]StreamLimits
 
 	clients map[string]*HybridClientState // key: exchange:marketType:symbol
@@ -57,6 +58,7 @@ type HybridManager struct {
 	// Worker pool for processing trades
 	numWorkers   int
 	processQueue chan *HybridClientState
+	inFlightCount atomic.Int64
 
 	// Adaptive polling configuration
 	minProcessDelay time.Duration // Minimum delay (high activity / euforia)
@@ -129,7 +131,7 @@ func NewHybridManager(handler TradeHandler, numWorkers int, factories map[string
 		numWorkers:      numWorkers,
 		processQueue:    make(chan *HybridClientState, 100000),
 		minProcessDelay: defaultMinProcessDelay, // 50ms - for market euphoria
-		maxProcessDelay: defaultMaxProcessDelay, // 500ms - for idle periods
+		maxProcessDelay: defaultMaxProcessDelay, // 200ms - for idle periods
 		currentDelay:    defaultMaxProcessDelay, // Start conservative
 		factories:       catalog,
 		log:             logger.OrDiscard(logs...),
@@ -196,6 +198,10 @@ func (m *HybridManager) SetGapRecovery(gr streaming.GapRecoveryQueue) {
 	m.gapRecovery = gr
 	logger.OrDiscard(m.log).Info("hybrid manager: gap recovery manager configured")
 }
+
+// SetMetrics injects the ingestion observability port used by the 500 ms
+// buffer sampler and by series deletion on unsubscribe.
+func (m *HybridManager) SetMetrics(metrics Metrics) { m.metrics = metrics }
 
 // SetTradeBufferSize sets the per-symbol trade buffer size for native clients.
 func (m *HybridManager) SetTradeBufferSize(size int) {
@@ -326,6 +332,7 @@ func (m *HybridManager) Unsubscribe(symbol, exchangeID string, marketType market
 		return nil
 	}
 	delete(m.clients, key)
+	m.metrics.deleteTradesBuffer(exchangeID, marketType.String(), symbol)
 
 	// Check if any other subscription shares the same client (pooled connections)
 	clientShared := false
@@ -398,6 +405,7 @@ func (m *HybridManager) adaptiveDelayCalculator(ctx context.Context) {
 			oldDelay := m.currentDelay
 			m.currentDelay = newDelay
 			m.delayMu.Unlock()
+			m.publishBufferStats()
 
 			// Log significant delay changes
 			if newDelay != oldDelay {
@@ -417,15 +425,18 @@ func (m *HybridManager) calculateAdaptiveDelay() time.Duration {
 		return m.maxProcessDelay
 	}
 
-	// Sample buffer fill ratios
-	var totalFill float64
+	// The buffer is PER SYMBOL. The average fill hides one full symbol behind hundreds of
+	// empty ones — which is exactly how a rally overflowed a hot symbol while the manager
+	// still read "market idle" and kept the 500 ms delay. The symbol that is full is the one
+	// whose drain cadence matters, so the decision uses the MAXIMUM fill.
+	var maxFill float64
 	var samples int
 
 	for _, state := range m.clients {
-		// Check whether the client implements BufferFillAware
 		if fillAware, ok := state.Client.(BackpressureSource); ok {
-			fill := fillAware.GetBufferFillRatio(state.Symbol)
-			totalFill += fill
+			if fill := fillAware.GetBufferFillRatio(state.Symbol); fill > maxFill {
+				maxFill = fill
+			}
 			samples++
 		}
 	}
@@ -435,25 +446,65 @@ func (m *HybridManager) calculateAdaptiveDelay() time.Duration {
 		return m.maxProcessDelay
 	}
 
-	avgFill := totalFill / float64(samples)
+	return processDelayForFill(maxFill, m.minProcessDelay, m.maxProcessDelay)
+}
 
-	// Determine the delay from the fill ratio
+// processDelayForFill maps the fullest buffer to a drain cadence. Pure, so the decision
+// boundary is tested without a client fleet.
+func processDelayForFill(fill float64, minDelay, maxDelay time.Duration) time.Duration {
 	switch {
-	case avgFill >= bufferHighThreshold:
+	case fill >= bufferHighThreshold:
 		// Very full buffers (70%+) — market euphoria: use the minimum delay to drain quickly
-		return m.minProcessDelay
+		return minDelay
 
-	case avgFill >= bufferMedThreshold:
+	case fill >= bufferMedThreshold:
 		// Partially full buffers (30-70%) — moderate activity: interpolate between min and max
 		fillRange := bufferHighThreshold - bufferMedThreshold
-		fillPosition := (avgFill - bufferMedThreshold) / fillRange
-		delayRange := float64(m.maxProcessDelay - m.minProcessDelay)
-		return m.maxProcessDelay - time.Duration(fillPosition*delayRange)
+		fillPosition := (fill - bufferMedThreshold) / fillRange
+		delayRange := float64(maxDelay - minDelay)
+		return maxDelay - time.Duration(fillPosition*delayRange)
 
 	default:
 		// Empty buffers (<30%) — save CPU
-		return m.maxProcessDelay
+		return maxDelay
 	}
+}
+
+// publishBufferStats samples every client's exact buffer snapshot and publishes
+// current fill, max fill, resolved capacity and last-drain age per symbol. It
+// runs on the existing 500 ms ticker, so the ingest hot path never pays for it.
+// The snapshot is collected under RLock and published after releasing it, so a
+// slow metrics backend cannot block subscription changes.
+func (m *HybridManager) publishBufferStats() {
+	type sample struct {
+		exchange   string
+		marketType string
+		symbol     string
+		stats      streaming.BufferStats
+	}
+	m.mu.RLock()
+	samples := make([]sample, 0, len(m.clients))
+	for _, state := range m.clients {
+		aware, ok := state.Client.(BufferStatsSource)
+		if !ok {
+			continue
+		}
+		stats, ok := aware.GetBufferStats(state.Symbol)
+		if !ok {
+			continue
+		}
+		samples = append(samples, sample{
+			exchange:   state.Exchange,
+			marketType: state.MarketType.String(),
+			symbol:     state.Symbol,
+			stats:      stats,
+		})
+	}
+	m.mu.RUnlock()
+	for _, item := range samples {
+		m.metrics.setTradesBuffer(item.exchange, item.marketType, item.symbol, item.stats)
+	}
+	m.metrics.setWorkerQueue(len(m.processQueue), int(m.inFlightCount.Load()))
 }
 
 func (m *HybridManager) scheduleClients() {
@@ -498,7 +549,13 @@ func (m *HybridManager) worker(ctx context.Context, id int) {
 func (m *HybridManager) processClient(ctx context.Context, _ int, state *HybridClientState) {
 	// Release the in-flight claim on EVERY exit path, including the early returns below.
 	// A leaked claim would silently stop this symbol from ever being drained again.
-	defer state.inFlight.Store(false)
+	started := time.Now()
+	m.inFlightCount.Add(1)
+	defer func() {
+		state.inFlight.Store(false)
+		m.inFlightCount.Add(-1)
+		m.metrics.addWorkerBusy(time.Since(started).Seconds())
+	}()
 
 	// Get trades from client
 	trades, err := state.Client.GetTrades(ctx, state.Symbol)
@@ -531,6 +588,7 @@ func (m *HybridManager) Stop() {
 		// Shutdown teardown — unactionable, discarded explicitly.
 		_ = state.Client.Unsubscribe(state.Symbol)
 		_ = state.Client.Close()
+		m.metrics.deleteTradesBuffer(state.Exchange, state.MarketType.String(), state.Symbol)
 		delete(m.clients, key)
 	}
 	m.mu.Unlock()

@@ -53,8 +53,8 @@ func waitFor(t *testing.T, timeout time.Duration, check func() bool) bool {
 }
 
 func aggTradeFrame(symbol string, price, qty string) string {
-	return `{"stream":"` + strings.ToLower(strings.ReplaceAll(symbol, "/", "")) + `@trade","data":` +
-		`{"e":"trade","s":"` + symbol + `","t":42,"p":"` + price + `","q":"` + qty + `","T":1793882096789,"m":false}}`
+	return `{"stream":"` + strings.ToLower(strings.ReplaceAll(symbol, "/", "")) + `@aggTrade","data":` +
+		`{"e":"aggTrade","s":"` + symbol + `","a":42,"p":"` + price + `","q":"` + qty + `","T":1793882096789,"m":false}}`
 }
 
 func TestAggTradeCallbackParsesWirePayload(t *testing.T) {
@@ -64,7 +64,7 @@ func TestAggTradeCallbackParsesWirePayload(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	c.tradeCallback("BTC/USDT")(payload)
+	c.tradeCallback("BTC/USDT", 0)(payload)
 	if got := c.buffers.GetOrCreate("BTC/USDT").Len(); got != 1 {
 		t.Fatalf("buffered = %d, want 1 (messagesIn=%d dropped=%d)", got, c.messagesIn.Load(), c.tradesDropped.Load())
 	}
@@ -205,16 +205,16 @@ func TestAdapterCloseIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestStreamNameUsesIndividualTradeStream(t *testing.T) {
-	if got := streamName("BTC/USDT"); got != "btcusdt@trade" {
-		t.Fatalf("streamName = %q, want btcusdt@trade", got)
+func TestStreamNameUsesAggregateTradeStream(t *testing.T) {
+	if got := streamName("BTC/USDT"); got != "btcusdt@aggTrade" {
+		t.Fatalf("streamName = %q, want btcusdt@aggTrade", got)
 	}
 }
 
 func TestTradeCallbackKeepsIndividualTradeID(t *testing.T) {
 	c := &SDKClient{combinedURLConnectEnabled: true, livenessLedgerEnabled: true, buffers: NewBufferManager(10)}
 	payload := []byte(`{"e":"trade","s":"BTC/USDT","t":987654321,"p":"101.5","q":"2","T":1793882096789,"m":false}`)
-	c.tradeCallback("BTC/USDT")(payload)
+	c.tradeCallback("BTC/USDT", 0)(payload)
 	trades := c.buffers.GetOrCreate("BTC/USDT").Flush()
 	if len(trades) != 1 {
 		t.Fatalf("buffered trades = %d, want 1", len(trades))

@@ -6,16 +6,16 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/gorilla/websocket"
 )
 
-// TestClassifyDisconnect pins the SRE/kernel/app cause taxonomy. The two field
-// signatures we actually observed in production are explicitly covered: the
-// `close 1006 (abnormal closure): unexpected EOF` (Binance-side recycle) and the
-// `read tcp ...: read: connection reset by peer` (kernel RST from the peer).
+// TestClassifyDisconnect pins the SRE/kernel/app cause taxonomy. The field
+// signature `close 1006 (abnormal closure): unexpected EOF` is covered, but it
+// is NOT a venue reason: 1006 is generated locally when no close frame arrived.
 func TestClassifyDisconnect(t *testing.T) {
 	tests := []struct {
 		name string
@@ -23,7 +23,7 @@ func TestClassifyDisconnect(t *testing.T) {
 		want string
 	}{
 		{"nil", nil, "none"},
-		{"close 1006 abnormal (field #2)", &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"}, "close_1006"},
+		{"close 1006 abnormal (no close frame)", &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"}, "transport_unattributed"},
 		{"close 1000 normal", &websocket.CloseError{Code: websocket.CloseNormalClosure}, "close_1000"},
 		{"close 1012 service restart", &websocket.CloseError{Code: 1012}, "close_1012"},
 		{"econnreset wrapped (field #3)", &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}, "tcp_reset"},
@@ -36,7 +36,7 @@ func TestClassifyDisconnect(t *testing.T) {
 		{"net closed", net.ErrClosed, "closed"},
 		{"use of closed string", errors.New("use of closed network connection"), "closed"},
 		{"unknown", errors.New("something we have never seen"), "other"},
-		{"wrapped close 1006", fmt.Errorf("read: %w", &websocket.CloseError{Code: 1006}), "close_1006"},
+		{"wrapped close 1006", fmt.Errorf("read: %w", &websocket.CloseError{Code: 1006}), "transport_unattributed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -44,6 +44,27 @@ func TestClassifyDisconnect(t *testing.T) {
 				t.Errorf("classifyDisconnect(%v) = %q, want %q", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestClose1006WithoutFrameIsTransportUnattributed is the named SPC-13 proof: 1006 is the
+// local stack reporting that NO close frame arrived (RFC 6455 §7.4.1 reserves it and forbids
+// sending it). The label must not blame the venue, and it must stay distinct from a real close
+// frame carrying a documented code.
+func TestClose1006WithoutFrameIsTransportUnattributed(t *testing.T) {
+	noFrame := &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"}
+	if got := classifyDisconnect(noFrame); got != "transport_unattributed" {
+		t.Fatalf("classifyDisconnect(1006) = %q, want transport_unattributed", got)
+	}
+	// A close frame that DID arrive keeps its code: the rule is about absence, not about 1xxx.
+	if got := classifyDisconnect(&websocket.CloseError{Code: websocket.CloseNormalClosure}); got != "close_1000" {
+		t.Fatalf("classifyDisconnect(close frame 1000) = %q, want close_1000", got)
+	}
+	// The same absence expressed as a transport sentinel is never attributed to the venue.
+	for _, err := range []error{io.EOF, io.ErrUnexpectedEOF, syscall.ECONNRESET} {
+		if got := classifyDisconnect(err); strings.HasPrefix(got, "close_") {
+			t.Fatalf("classifyDisconnect(%v) = %q, want a transport cause", err, got)
+		}
 	}
 }
 

@@ -50,6 +50,8 @@ type SDKClient struct {
 	wsConn *binancews.Connection
 	// wsBasePath is resolved once at construction; tests may override it.
 	wsBasePath string
+	// tradeWSEdges pins the trade sockets to known-good edges; empty keeps DNS.
+	tradeWSEdges []string
 	// combinedURLConnectEnabled and livenessLedgerEnabled are client tuning flags. They live
 	// on the client so tests can flip them without mutating process-wide state.
 	combinedURLConnectEnabled bool
@@ -74,8 +76,20 @@ type SDKClient struct {
 	// Reconnection
 	reconnectCount atomic.Uint64
 	reconnecting   atomic.Bool
-	reconnectMu    sync.Mutex  // protects re-subscription
-	reconnectCh    chan string // buffered(1); signals the reconnect worker (deduped)
+	reconnectMu    sync.Mutex // protects re-subscription
+	// buffered(1), deduped. The request carries the PARTITION: an error on one combined-URL
+	// socket used to be routed as a string and lost its identity, so the handler closed both
+	// partitions for one partition's fault.
+	reconnectCh chan reconnectRequest
+	// Partition reconnect stability. The backoff engaged only on a FAILED dial; a dial that
+	// succeeded and died seconds later reset it. Measured in PRD on 2026-11-21: 7 reconnects
+	// in 17 s, each new socket alive 1-4 s, ~214k tape trades lost and repaired. A socket
+	// must live reconnectStabilityFloor before the next reconnect dials immediately.
+	partitionStabilityMu sync.Mutex
+	partitionUpSince     map[int]time.Time
+	partitionShortStreak map[int]int
+	dropLogMu            sync.Mutex
+	dropLogged           map[string]struct{}
 
 	// State
 	connected     atomic.Bool
@@ -146,10 +160,13 @@ func NewSDKClient(config streaming.ClientConfig, logs ...*slog.Logger) *SDKClien
 		heartbeat:                 &starvationHeartbeat{},
 		symbols:                   make(map[string]bool),
 		wsBasePath:                defaultFuturesWSBasePath(),
+		tradeWSEdges:              wsEdgesFromEnv("GOWHALE_BINANCE_FUTURES_TRADE_WS_EDGES"),
 		combinedURLConnectEnabled: true,
 		livenessLedgerEnabled:     true,
 		netdiag:                   netdiag.New(),
-		reconnectCh:               make(chan string, 1),
+		reconnectCh:               make(chan reconnectRequest, 1),
+		partitionUpSince:          make(map[int]time.Time),
+		partitionShortStreak:      make(map[int]int),
 		ctx:                       ctx,
 		cancel:                    cancel,
 		pacer:                     newSubscribePacer(subscribeMinInterval),
@@ -179,10 +196,23 @@ func (c *SDKClient) SetMetrics(m Metrics) {
 // panicking on the nil interface.
 func (c *SDKClient) closed() bool { return c.ctx != nil && c.ctx.Err() != nil }
 
+// reconnectRequest names WHAT failed. A partition-scoped request heals one socket; a fleet request
+// (-1) rebuilds everything, and is the fallback whenever the scope cannot be honoured.
+type reconnectRequest struct {
+	partition int
+	reason    string
+	// at is when the failure was OBSERVED. The gap-recovery window starts here, not when the
+	// reconnect happens to run: a stability delay must not hide the tape lost while it waits.
+	at time.Time
+	// delayed marks a request already re-enqueued after the stability delay, so it is not
+	// delayed again (which would double-count the streak).
+	delayed bool
+}
+
 // requestReconnect signals the reconnect worker without blocking (deduped by the buffered channel).
-func (c *SDKClient) requestReconnect(reason string) {
+func (c *SDKClient) requestReconnect(partition int, reason string) {
 	select {
-	case c.reconnectCh <- reason:
+	case c.reconnectCh <- reconnectRequest{partition: partition, reason: reason, at: time.Now()}:
 	default:
 		// A reconnect is already queued/running — the signal was dropped.
 		// Surface it as a metric so reconnect churn is observable.
@@ -197,8 +227,8 @@ func (c *SDKClient) reconnectWorker() {
 		select {
 		case <-c.ctx.Done():
 			return
-		case reason := <-c.reconnectCh:
-			c.reconnectAndResubscribe(reason)
+		case req := <-c.reconnectCh:
+			c.reconnectAndResubscribe(req)
 		}
 	}
 }
@@ -250,7 +280,9 @@ func (c *SDKClient) connectLocked(ctx context.Context) error {
 	logger.OrDiscard(c.log).Info("binance ws: connecting to market streams")
 	conn := binancews.NewConnection(0, c.wsBasePath,
 		binancews.WithRoute(routeFor(venueBinance, marketTypeFuture, streamClassTrade)),
-		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)))
+		binancews.WithPinnedEdges(c.tradeWSEdges),
+		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)),
+		binancews.WithComponent("trade"))
 	if err := connectMarketStream(ctx, c.ctx, conn, nil); err != nil {
 		return fmt.Errorf("binance websocket connect failed: %w", err)
 	}
@@ -411,7 +443,7 @@ func (c *SDKClient) checkPartitionLiveness() {
 		"stale_symbols", deadStat.Stale,
 		"total_symbols", deadStat.Total,
 		"stale_fraction", deadStat.StaleFraction())
-	c.requestReconnect(fmt.Sprintf("partition %d liveness stall (%d/%d stale)", deadPid, deadStat.Stale, deadStat.Total))
+	c.requestReconnect(deadPid, fmt.Sprintf("liveness stall (%d/%d stale)", deadStat.Stale, deadStat.Total))
 }
 
 // resubscribeVerifyWindow is how long after a resubscribe to wait before checking
@@ -480,7 +512,9 @@ func (c *SDKClient) partitionLikelyLive(pid int) bool {
 func (c *SDKClient) newFuturesWS(id int) *binancews.Connection {
 	return binancews.NewConnection(id, c.wsBasePath,
 		binancews.WithRoute(routeFor(venueBinance, marketTypeFuture, streamClassTrade)),
-		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)))
+		binancews.WithPinnedEdges(c.tradeWSEdges),
+		binancews.WithReadIdle(readIdleFor(venueBinance, marketTypeFuture)),
+		binancews.WithComponent("trade"))
 }
 
 // connectAndResubscribeCombined performs the combined-URL reconnect: it (re)builds one SDK
@@ -545,7 +579,7 @@ func (c *SDKClient) connectAndResubscribeCombined(symbols []string) (int, error)
 			if c.livenessLedgerEnabled {
 				c.ledger.Assign(symbol, i)
 			}
-			handlers[streamName(symbol)] = c.tradeCallback(symbol)
+			handlers[streamName(symbol)] = c.tradeCallback(symbol, i)
 		}
 		logger.OrDiscard(c.log).Info("binance ws: combined-URL connect partition",
 			"partition", i+1, "partitions", len(parts), "streams", len(slice))
@@ -558,6 +592,7 @@ func (c *SDKClient) connectAndResubscribeCombined(symbols []string) (int, error)
 			return 0, fmt.Errorf("combined-URL connect failed (partition %d/%d, %d streams): %w", i+1, len(parts), len(slice), err)
 		}
 		clients = append(clients, conn)
+		c.markPartitionUp(i)
 		resubscribed += len(part)
 	}
 
@@ -621,7 +656,7 @@ func (c *SDKClient) Subscribe(ctx context.Context, symbol string) error {
 		return nil
 	}
 
-	if err := conn.Subscribe(ctx, streamName(symbol), c.tradeCallback(symbol)); err != nil {
+	if err := conn.Subscribe(ctx, streamName(symbol), c.tradeCallback(symbol, conn.ID)); err != nil {
 		return fmt.Errorf("failed to subscribe to %s aggTrade: %w", symbol, err)
 	}
 	if c.livenessLedgerEnabled {
@@ -635,28 +670,30 @@ func (c *SDKClient) Subscribe(ctx context.Context, symbol string) error {
 		WithSymbol(symbol).
 		Log()
 
-	logger.OrDiscard(c.log).Info("subscribed via sdk", "symbol", symbol, "stream", "@trade")
+	logger.OrDiscard(c.log).Info("subscribed via sdk", "symbol", symbol, "stream", "@aggTrade")
 	return nil
 }
 
 // tradeCallback returns the per-symbol message handler. Shared by Subscribe
 // (dynamic add) and the combined-URL resubscribe path so both record metrics,
 // parse, and buffer identically.
-func (c *SDKClient) tradeCallback(symbol string) binancews.Handler {
+func (c *SDKClient) tradeCallback(symbol string, partition int) binancews.Handler {
 	return func(data []byte) {
 		defer func() {
 			if r := recover(); r != nil {
-				logger.OrDiscard(c.log).Error("panic in binance trade callback", "symbol", symbol, "panic", r)
-				c.tradesDropped.Add(1)
-				c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+				if c.firstDropLog(trade.DropPanic, symbol, partition) {
+					logger.OrDiscard(c.log).Error("panic in binance trade callback", "symbol", symbol, "partition", partition, "panic", r)
+				}
+				c.recordDrop(trade.DropPanic, symbol, partition)
 			}
 		}()
 
 		var event tradeEvent
 		if err := json.Unmarshal(data, &event); err != nil {
-			logger.OrDiscard(c.log).Warn("binance trade callback: malformed frame", "symbol", symbol, "error", err)
-			c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+			if c.firstDropLog(trade.DropMalformedFrame, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("binance trade callback: malformed frame", "symbol", symbol, "partition", partition, "error", err)
+			}
+			c.recordDrop(trade.DropMalformedFrame, symbol, partition)
 			return
 		}
 
@@ -675,10 +712,12 @@ func (c *SDKClient) tradeCallback(symbol string) binancews.Handler {
 		// with the real age computed from c.lastMessageAt.
 		c.metrics.incMessagesIn(venueBinance, marketTypeFuture)
 
-		trade := c.toDomainTrade(&event)
-		if trade == nil {
-			c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+		domainTrade := c.toDomainTrade(&event)
+		if domainTrade == nil {
+			if c.firstDropLog(trade.DropNilTrade, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("binance trade callback: empty trade payload", "symbol", symbol, "partition", partition)
+			}
+			c.recordDrop(trade.DropNilTrade, symbol, partition)
 			return
 		}
 
@@ -687,10 +726,15 @@ func (c *SDKClient) tradeCallback(symbol string) binancews.Handler {
 		// "parsed - dropped" would not be the number that reached the aggregator. The two
 		// branches are disjoint and their sum is the parsed count.
 		buf := c.buffers.GetOrCreate(symbol)
-		if buf.Append(*trade) {
-			logger.OrDiscard(c.log).Warn("trade buffer overflow; trade dropped", "symbol", symbol, "cap", c.config.TradeBufferSize)
-			c.tradesDropped.Add(1)
-			c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+		if buf.Append(*domainTrade) {
+			// The counter carries every loss; the log carries the FIRST one per
+			// symbol/partition, so a sustained overflow cannot drown the line
+			// that says it started and one hot symbol cannot hide another.
+			if c.firstDropLog(trade.DropBufferOverflow, symbol, partition) {
+				logger.OrDiscard(c.log).Warn("trade buffer overflow; trade dropped (first for location)",
+					"symbol", symbol, "partition", partition, "cap", c.config.TradeBufferSize)
+			}
+			c.recordDrop(trade.DropBufferOverflow, symbol, partition)
 			return
 		}
 		c.tradesIn.Add(1)
@@ -716,14 +760,14 @@ func (c *SDKClient) Unsubscribe(symbol string) error {
 	conn := c.wsConn
 	c.connectMu.Unlock()
 	if conn != nil {
-		_ = conn.Unsubscribe(context.Background(), strings.ToLower(strings.ReplaceAll(symbol, "/", ""))+"@trade")
+		_ = conn.Unsubscribe(context.Background(), streamName(symbol))
 	}
 
 	c.buffers.Remove(symbol)
 	if c.livenessLedgerEnabled {
 		c.ledger.Forget(symbol)
 	}
-	logger.OrDiscard(c.log).Info("unsubscribed", "symbol", symbol, "stream", "@trade")
+	logger.OrDiscard(c.log).Info("unsubscribed", "symbol", symbol, "stream", "@aggTrade")
 	return nil
 }
 
@@ -778,7 +822,7 @@ func (c *SDKClient) startConnectionMonitor(connCtx context.Context) {
 		reconnecting:     &c.reconnecting,
 		connected:        &c.connected,
 		metrics:          c.metrics,
-		requestReconnect: c.requestReconnect,
+		requestReconnect: func(reason string) { c.requestReconnect(-1, reason) },
 		shutdownLog:      "binance sdk connection monitor shutting down",
 		disconnectedLog:  "binance sdk: connection monitor detects disconnected state",
 		stalledLog:       "binance sdk: no messages received",
@@ -799,6 +843,170 @@ func recordResubscribeOutcome(metrics Metrics, market string, total, resubscribe
 		log.Warn("binance sdk: resubscribe incomplete; symbols not restored after reconnect",
 			"missing", incomplete, "symbols", total, "market_type", market)
 	}
+}
+
+// reconnectOnePartition closes and re-dials ONE combined-URL partition.
+//
+// A partition-0 socket error used to close partitions 0 and 1, resetting the healthy sister's
+// connection, counters and ledger assignment for a fault that was not hers. The membership comes
+// from the ledger, which is written on the combined dial and on
+// every dynamic Subscribe — the only structure that sees all ownership changes.
+//
+// The caller holds reconnectMu and has set reconnecting, so this cannot race a fleet rebuild.
+// partitionReconnectDelay returns how long a reconnect must wait before dialing. A socket
+// that lived at least the stability floor resets the streak and dials at once; a short-lived
+// one pays the same exponential backoff a failed dial pays, so a flapping endpoint cannot turn
+// into a reconnect storm.
+func partitionReconnectDelay(upFor time.Duration, streak int) time.Duration {
+	if streak <= 0 || upFor >= reconnectStabilityFloor {
+		return 0
+	}
+	delay := reconnectBackoffBase
+	for i := 1; i < streak; i++ {
+		delay = time.Duration(float64(delay) * reconnectBackoffRate)
+		if delay >= reconnectBackoffMax {
+			return reconnectBackoffMax
+		}
+	}
+	return delay
+}
+
+// notePartitionReconnect classifies the previous socket's lifetime and arms the stability
+// delay for this reconnect. The streak resets as soon as a socket proves it can live.
+func (c *SDKClient) notePartitionReconnect(pid int, at time.Time) (time.Duration, int) {
+	c.partitionStabilityMu.Lock()
+	defer c.partitionStabilityMu.Unlock()
+	if c.partitionUpSince == nil {
+		c.partitionUpSince = make(map[int]time.Time)
+	}
+	if c.partitionShortStreak == nil {
+		c.partitionShortStreak = make(map[int]int)
+	}
+	up, seen := c.partitionUpSince[pid]
+	next := c.partitionShortStreak[pid] + 1
+	upFor := time.Duration(0)
+	if seen {
+		if at.IsZero() {
+			at = time.Now()
+		}
+		upFor = at.Sub(up)
+	}
+	if delay := partitionReconnectDelay(upFor, next); delay > 0 {
+		c.partitionShortStreak[pid] = next
+		return delay, next
+	}
+	c.partitionShortStreak[pid] = 0
+	return 0, 0
+}
+
+// partitionAlreadyRestored reports whether the partition's live socket was established AFTER the
+// request was observed — the error it names is already healed.
+func (c *SDKClient) partitionAlreadyRestored(pid int, at time.Time) bool {
+	c.partitionStabilityMu.Lock()
+	defer c.partitionStabilityMu.Unlock()
+	up, ok := c.partitionUpSince[pid]
+	return ok && up.After(at)
+}
+
+// markPartitionUp records a successful partition dial. It does not reset the streak: the next
+// reconnect decides from how long THIS socket lived.
+func (c *SDKClient) markPartitionUp(pid int) {
+	c.partitionStabilityMu.Lock()
+	if c.partitionUpSince == nil {
+		c.partitionUpSince = make(map[int]time.Time)
+	}
+	c.partitionUpSince[pid] = time.Now()
+	c.partitionStabilityMu.Unlock()
+}
+
+func (c *SDKClient) reconnectOnePartition(pid int, reason string) bool {
+	// Read at RECONNECT time, not when the failure was observed: the old capture happened
+	// before a stability delay of up to 30 s, so an unsubscribe during the wait was undone by
+	// the redial (a deranked symbol resurrected) and a subscribe was lost (no producer).
+	symbols := c.livePartitionSymbols(pid)
+	if len(symbols) == 0 {
+		return false
+	}
+
+	c.connectMu.Lock()
+	if pid < 0 || pid >= len(c.partitions) || c.partitions[pid] == nil {
+		c.connectMu.Unlock()
+		return false
+	}
+	victim := c.partitions[pid]
+	connCtx := c.connCtx
+	c.connectMu.Unlock()
+
+	logger.OrDiscard(c.log).Warn("binance sdk: reconnecting ONE partition",
+		"partition", pid, "symbols", len(symbols), "reason", reason)
+	if err := victim.Close(); err != nil {
+		logger.OrDiscard(c.log).Warn("binance sdk: closing the failed partition",
+			"partition", pid, "error", err)
+	}
+
+	conn := c.newFuturesWS(pid)
+	handlers := make(map[string]binancews.Handler, len(symbols))
+	for _, symbol := range symbols {
+		c.ledger.Assign(symbol, pid)
+		handlers[streamName(symbol)] = c.tradeCallback(symbol, conn.ID)
+	}
+	if err := connectMarketStream(c.ctx, c.ctx, conn, handlers); err != nil {
+		// The partition is gone and its symbols have no producer. The caller falls back to the
+		// fleet path, which is the only remaining way to restore them.
+		logger.OrDiscard(c.log).Error("binance sdk: partition redial failed; falling back to the fleet",
+			"partition", pid, "error", err)
+		NewSDKEvent(EventReconnectFailed, venueBinance, marketTypeFuture, c.log).
+			WithReason("partition_redial_failed").
+			Log()
+		return false
+	}
+
+	c.markPartitionUp(pid)
+	c.connectMu.Lock()
+	if c.ctx.Err() != nil {
+		// Close canceled the lifecycle before this dial published: the new socket must not
+		// outlive the client. Cancellation happens BEFORE Close takes connectMu, so this check
+		// and Close's sweep cannot both miss it.
+		c.connectMu.Unlock()
+		_ = conn.Close()
+		return true
+	}
+	c.partitions[pid] = conn
+	if pid == 0 {
+		c.wsConn = conn
+	}
+	c.connectMu.Unlock()
+
+	// The replacement needs its own terminal-error watcher under the CURRENT connection context:
+	// cancelling that context would take the sister down too, which is the defect being removed.
+	if connCtx != nil && connCtx.Err() == nil {
+		c.connWg.Add(1)
+		go func() {
+			defer c.connWg.Done()
+			watchTransportError(connCtx, pid, conn, marketTypeFuture, c.metrics, c.netdiag,
+				func(reason string) { c.requestReconnect(pid, reason) }, c.log, nil)
+		}()
+	}
+	c.triggerGapRecovery(symbols)
+	return true
+}
+
+// livePartitionSymbols intersects the ledger's partition membership with the CURRENT subscription
+// set, so a redial never resurrects a symbol the operator removed while it waited.
+func (c *SDKClient) livePartitionSymbols(pid int) []string {
+	members := c.ledger.SymbolsForPartition(pid)
+	if len(members) == 0 {
+		return nil
+	}
+	c.symbolsMu.RLock()
+	defer c.symbolsMu.RUnlock()
+	out := make([]string, 0, len(members))
+	for _, sym := range members {
+		if c.symbols[sym] {
+			out = append(out, sym)
+		}
+	}
+	return out
 }
 
 // closeAllConnections closes every live WebSocket connection: all combined-URL
@@ -848,7 +1056,38 @@ func (c *SDKClient) reconnectDial(symbols []string) (int, error) {
 // On the empty-connect path the Binance SDK v2 does NOT resubscribe to market streams after
 // reconnect, so this closes everything, reconnects, and re-subscribes all tracked symbols.
 // On the combined-URL path the server subscribes on the handshake (frame-free).
-func (c *SDKClient) reconnectAndResubscribe(reason string) {
+func (c *SDKClient) reconnectAndResubscribe(req reconnectRequest) {
+	reason := req.reason
+
+	// A request older than the live socket is stale: the partition was already restored after
+	// the error that produced it. Processing it would tear down a healthy connection.
+	if req.partition >= 0 && !req.at.IsZero() && c.partitionAlreadyRestored(req.partition, req.at) {
+		logger.OrDiscard(c.log).Debug("binance sdk: stale reconnect request ignored",
+			"partition", req.partition, "reason", reason)
+		return
+	}
+
+	// The stability delay is taken BEFORE the reconnect lock and the reconnecting flag: a
+	// partition flapping must not serialize recovery of the others, nor make the whole client
+	// report "reconnecting" while it merely waits. The worker is released; the request returns
+	// on the timer.
+	if req.partition >= 0 && !req.delayed {
+		if delay, streak := c.notePartitionReconnect(req.partition, req.at); delay > 0 {
+			logger.OrDiscard(c.log).Warn("binance sdk: partition reconnect delayed for stability",
+				"partition", req.partition, "delay", delay, "short_streak", streak, "reason", reason)
+			req.delayed = true
+			time.AfterFunc(delay, func() {
+				select {
+				case <-c.ctx.Done():
+				case c.reconnectCh <- req:
+				default:
+					c.metrics.incReconnectSignalDropped(venueBinance, marketTypeFuture)
+				}
+			})
+			return
+		}
+	}
+
 	if c.reconnecting.Load() {
 		// Warn so the skip is visible under log_level=warn.
 		logger.OrDiscard(c.log).Warn("binance sdk: reconnect already in progress; skipping")
@@ -873,6 +1112,18 @@ func (c *SDKClient) reconnectAndResubscribe(reason string) {
 			Log()
 		return
 	default:
+	}
+
+	// The window starts when the failure was observed. The partition path never recorded it, so
+	// the FIRST socket failure after boot skipped gap recovery entirely; the fleet path recorded
+	// it late, shortening the window by the whole rebuild.
+	c.disconnectTime.Store(req.at)
+
+	// A partition-scoped request is honoured only when the partition and its members are known.
+	// Otherwise the fleet path runs, because redialing a partition with the wrong symbol list is
+	// worse than rebuilding everything.
+	if req.partition >= 0 && c.reconnectOnePartition(req.partition, reason) {
+		return
 	}
 
 	c.symbolsMu.RLock()
@@ -904,7 +1155,6 @@ func (c *SDKClient) reconnectAndResubscribe(reason string) {
 	// Mark disconnected before abandoning the transport and its handlers.
 	c.connected.Store(false)
 	c.lastMessageAt.Store(time.Time{}) // zero time to force health check detection
-	c.disconnectTime.Store(time.Now())
 
 	// Decouple gap-recovery enqueue from reconnect SUCCESS: enqueue the window on
 	// EVERY exit path below (including a failed Connect() or partial resubscribe),
@@ -1125,6 +1375,12 @@ func (c *SDKClient) GetBufferFillRatio(symbol string) float64 {
 	return float64(buf.Len()) / float64(c.bufCap)
 }
 
+// GetBufferStats is the timer-sampled snapshot: exact fill, max fill,
+// resolved cap and last drain. It never runs on the ingest hot path.
+func (c *SDKClient) GetBufferStats(symbol string) (streaming.BufferStats, bool) {
+	return c.buffers.GetBufferStats(symbol)
+}
+
 // Type returns the client type.
 func (c *SDKClient) Type() streaming.ClientType {
 	return streaming.ClientTypeNative
@@ -1143,7 +1399,15 @@ func (c *SDKClient) Close() error {
 	// Step 1: Cancel client lifecycle → stops all goroutines
 	c.cancel()
 
-	// Step 2: Cancel connection context (redundant but defensive).
+	// Step 2: Join the RECONNECT WORKER before sweeping the connections. It is the only caller
+	// of reconnectOnePartition, and that path publishes a fresh socket under connectMu after its
+	// dial returns. Sweeping first left a window in which the worker published a connection AFTER
+	// closeAllConnections had copied the set — the socket, its read loop and its renewal loop
+	// outlived Close, and connWg.Wait returned before their Add. Cancellation aborts the dial and
+	// the stability sleep, so this join is bounded.
+	c.wg.Wait()
+
+	// Step 3: Cancel connection context (redundant but defensive).
 	// Read connCancel under connectMu — connectLocked writes it under the same lock from the
 	// reconnect worker, so an unguarded read here is a data race.
 	c.connectMu.Lock()
@@ -1156,12 +1420,12 @@ func (c *SDKClient) Close() error {
 		cancel()
 	}
 
-	// Step 3: Release raw transports before joining connection goroutines.
+	// Step 4: Release raw transports before joining connection goroutines.
 	c.closeAllConnections()
 
-	// Step 4: Wait for ALL goroutines to exit.
+	// Step 5: Wait for the connection-scoped goroutines. No Add can race this Wait: the only
+	// reconnect path that adds them has already been joined.
 	c.connWg.Wait()
-	c.wg.Wait()
 
 	// Update metrics
 	c.metrics.setGoroutines(venueBinance, marketTypeFuture, float64(runtime.NumGoroutine()))
@@ -1209,6 +1473,35 @@ func (c *SDKClient) toDomainTrade(event *tradeEvent) *trade.Trade {
 		Amount:    amount,
 		Side:      side,
 	}
+}
+
+// recordDrop spends one local loss on the legacy aggregate AND on the classified
+// series that carries reason, symbol and the real connection partition. The two
+// counters are advanced together, from the same event, so the legacy aggregate is
+// always the sum of the classified deltas. It returns the new legacy total so the
+// first-overflow log keeps its once-per-buffer semantics.
+func (c *SDKClient) recordDrop(reason trade.DropReason, symbol string, partition int) uint64 {
+	total := c.tradesDropped.Add(1)
+	c.metrics.incTradesDropped(venueBinance, marketTypeFuture)
+	c.metrics.incTradesDroppedClassified(venueBinance, marketTypeFuture, symbol, partition, string(reason))
+	return total
+}
+
+// firstDropLog reports whether this (reason, symbol, partition) is being logged
+// for the first time. The counter keeps every loss; the log keeps one line per
+// location so a sustained condition cannot drown the evidence that it started.
+func (c *SDKClient) firstDropLog(reason trade.DropReason, symbol string, partition int) bool {
+	c.dropLogMu.Lock()
+	defer c.dropLogMu.Unlock()
+	if c.dropLogged == nil {
+		c.dropLogged = make(map[string]struct{})
+	}
+	key := string(reason) + "|" + symbol + "|" + strconv.Itoa(partition)
+	if _, exists := c.dropLogged[key]; exists {
+		return false
+	}
+	c.dropLogged[key] = struct{}{}
+	return true
 }
 
 // triggerGapRecovery triggers gap recovery for all symbols after a reconnect.
