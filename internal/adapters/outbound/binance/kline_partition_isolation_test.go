@@ -122,6 +122,21 @@ func TestFaultedPartitionRequiresADeliveringSister(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			// Production closes a busy stream with the last frame in the same millisecond as
+			// the error (last_frame_age_ms=0). Strict < made the fault invisible.
+			name: "last frame in the same millisecond as the fault",
+			parts: func() []*klinePartition {
+				p := fabricatedPartition(0, 5*time.Second, "AAA/USDT")
+				now := time.Now().UnixMilli()
+				p.lastFrameAt.Store(now)
+				p.faultedAt.Store(now)
+				return []*klinePartition{p, fabricatedPartition(1, time.Second, "BBB/USDT")}
+			}(),
+			wantOK:   true,
+			wantID:   0,
+			wantSyms: 1,
+		},
+		{
 			name:   "nothing faulted",
 			parts:  []*klinePartition{fabricatedPartition(0, time.Second, "AAA/USDT"), fabricatedPartition(1, time.Second, "BBB/USDT")},
 			wantOK: false,

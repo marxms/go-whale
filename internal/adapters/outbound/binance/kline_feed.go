@@ -562,7 +562,11 @@ func (f *KlineFeed) FaultedPartition(maxAgeSeconds float64) (PartitionStat, []st
 	delivering := 0
 	for _, p := range parts {
 		faulted := p.faultedAt.Load()
-		if faulted > 0 && now-faulted <= maxAgeMs && p.lastFrameAt.Load() < faulted {
+		// A busy stream closes with its last frame in the SAME millisecond as the terminal
+		// error (last_frame_age_ms=0). Strict < made those faults ineligible, so the 332-stream
+		// partition fell through to the slow silence path (78–89 s). A frame AFTER the fault
+		// clears faultedAt in noteFrame, so <= is safe here.
+		if faulted > 0 && now-faulted <= maxAgeMs && p.lastFrameAt.Load() <= faulted {
 			if victim == nil || faulted < victim.faultedAt.Load() {
 				victim = p
 			}
