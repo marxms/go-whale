@@ -3,6 +3,7 @@ package binancesdk
 import (
 	"os"
 	"strings"
+	"unicode"
 )
 
 // Combined-URL partition budget. Binance allows 1024 streams and a
@@ -93,13 +94,39 @@ func streamName(symbol string) string {
 // stream lands in exactly one partition; ordering is preserved. The result is
 // never empty when streams is non-empty.
 func partitionStreams(streams []string) [][]string {
-	return partitionStreamsWithBudget(streams, maxStreamsPerConnection, maxCombinedURLLength)
+	return partitionRiskyFirst(streams, maxStreamsPerConnection)
 }
 
 // partitionKlineStreams is the kline feed's partitioner. It reads the kline budget, so the
 // experiment can change one value without touching the aggTrade path (or the reverse).
 func partitionKlineStreams(streams []string) [][]string {
-	return partitionStreamsWithBudget(streams, maxKlineStreamsPerConnection, maxCombinedURLLength)
+	return partitionRiskyFirst(streams, maxKlineStreamsPerConnection)
+}
+
+// isRiskyStream reports whether the stream name carries characters outside ASCII. The
+// venue's stream parser is not uniform across its edges for such names: measured on
+// 2026-11-24, the trade partition carrying 币安人生USDT entered a reconnect flap (25+ remote
+// 1006s in 35 min) that no ASCII-only partition showed.
+func isRiskyStream(stream string) bool {
+	return strings.IndexFunc(stream, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
+}
+
+// partitionRiskyFirst isolates non-ASCII stream names on their own connection(s) before
+// the safe streams are partitioned. A venue edge that rejects such a name then costs a
+// handful of symbols instead of a full 200-332-stream partition. The count and URL budget
+// still apply inside each class, and every stream lands in exactly one partition.
+func partitionRiskyFirst(streams []string, maxStreams int) [][]string {
+	risky := make([]string, 0, 8)
+	safe := make([]string, 0, len(streams))
+	for _, stream := range streams {
+		if isRiskyStream(stream) {
+			risky = append(risky, stream)
+		} else {
+			safe = append(safe, stream)
+		}
+	}
+	parts := partitionStreamsWithBudget(risky, maxStreams, maxCombinedURLLength)
+	return append(parts, partitionStreamsWithBudget(safe, maxStreams, maxCombinedURLLength)...)
 }
 
 // partitionStreamsWithBudget is partitionStreams with explicit budgets, so tests can exercise

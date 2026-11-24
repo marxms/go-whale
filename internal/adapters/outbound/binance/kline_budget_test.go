@@ -38,7 +38,7 @@ func TestKlineBudgetIsSeparateFromAggTrade(t *testing.T) {
 	if !strings.Contains(text, "func partitionKlineStreams(") {
 		t.Fatal("the kline partitioner no longer exists")
 	}
-	if !strings.Contains(text, "partitionStreamsWithBudget(streams, maxKlineStreamsPerConnection, maxCombinedURLLength)") {
+	if !strings.Contains(text, "partitionRiskyFirst(streams, maxKlineStreamsPerConnection)") {
 		t.Fatal("the kline partitioner no longer reads maxKlineStreamsPerConnection")
 	}
 	if !strings.Contains(text, "maxKlineStreamsPerConnection = 200") {

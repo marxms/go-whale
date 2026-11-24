@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -398,9 +399,17 @@ func joinStreams(streams []string) string {
 		if i > 0 {
 			out += "/"
 		}
-		out += stream
+		out += encodeStreamName(stream)
 	}
 	return out
+}
+
+// encodeStreamName percent-encodes the stream name for the combined-stream query. The
+// venue publishes symbols that are not ASCII (measured 2026-11-24: 币安人生USDT), and a raw
+// UTF-8 request target is not valid; the "@" stays literal because it is the documented
+// symbol/channel separator, and the venue decodes each name after splitting on "/".
+func encodeStreamName(stream string) string {
+	return strings.ReplaceAll(url.QueryEscape(stream), "%40", "@")
 }
 
 // Subscribe registers a handler before asking the venue to add the stream, then
